@@ -1,0 +1,28 @@
+# Family CFO configuration (non-secret defaults).
+# Secrets belong in .env, never here.
+household: 我家
+currency: CNY
+timezone: Asia/Shanghai
+data_dir: ./data
+db_path: ./data/family_cfo.db
+
+# A transaction at or above this amount without a confident category goes to review.
+review_threshold: 200
+
+# Reconciliation windows (days).
+dedupe_window_days: 2
+transfer_window_days: 3
+
+# Automatically create a verified backup before destructive operations.
+auto_backup: true
+
+# Settlement: channels that must be present (or explicitly marked missing).
+settlement:
+  expected_sources:
+    - wechat
+    - alipay
+    - bank
+
+# Automation is generated but never enabled without `--yes`.
+automation:
+  enabled: false

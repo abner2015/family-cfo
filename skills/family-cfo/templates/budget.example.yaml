@@ -1,0 +1,19 @@
+# 示例：月度预算（保存为 config/budgets/2026-10.yaml 供参考）
+# 实际设置请用 CLI：
+#   family-cfo budget set --month 2026-10 --item 餐饮=1500 --item 教育=1000
+period: "2026-10"
+name: "2026-10 家庭预算"
+currency: CNY
+items:
+  - category: 餐饮
+    amount: "1500"
+    type: variable
+  - category: 教育
+    amount: "1000"
+    type: fixed
+  - category: 住房
+    amount: "6800"
+    type: fixed
+  - category: 交通
+    amount: "600"
+    type: variable

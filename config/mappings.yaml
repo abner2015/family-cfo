@@ -1,0 +1,3 @@
+# Named column mappings for bills that are not auto-detected.
+# Use: family-cfo import bill.csv --mapping-name <name>
+mappings: {}
