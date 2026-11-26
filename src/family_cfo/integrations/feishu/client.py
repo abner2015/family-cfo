@@ -218,7 +218,9 @@ class FeishuClient:
             f"/open-apis/bitable/v1/apps/{self.settings.feishu_app_token}/tables",
             json={"table": {"name": name, "default_view_name": "全部", "fields": fields}},
         )
-        return payload.get("data", {}).get("table", {})
+        # 飞书建表响应: {"data": {"table_id": ..., "default_view_id": ..., "field_id_list": [...]}}
+        # 注意没有 data.table 这一层 (create_field 才有 data.field)
+        return payload.get("data", {})
 
     def list_fields(self, table_id: str) -> list[dict]:
         payload = self.request(
