@@ -1,3 +1,23 @@
 # Named column mappings for bills that are not auto-detected.
 # Use: family-cfo import bill.csv --mapping-name <name>
-mappings: {}
+mappings:
+  jd:
+    platform: other
+    label: 京东交易流水
+    mapping:
+      date: 交易时间
+      counterparty: 交易对方
+      description: 商品
+      direction: 收/支
+      amount: 金额
+      status: 当前状态
+      external_id: 交易单号
+  cmb:
+    platform: bank
+    label: 招商银行流水
+    mapping:
+      date: 记账日期
+      counterparty: 对手信息
+      description: 交易摘要
+      direction: 方向
+      amount: 交易金额

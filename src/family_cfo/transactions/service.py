@@ -331,7 +331,9 @@ class TransactionService:
         if txn.status == TxnStatus.PENDING_REVIEW and txn.review_reason == REVIEW_UNCATEGORIZED:
             txn.status = TxnStatus.CONFIRMED
             txn.review_reason = None
-        txn.stats_included = True
+        # 分类不改变收支归属：非收支类型（转账/还款/退款等）即便被分类也必须保持排除，
+        # 否则一次 tx fix 就会把已排除的大额转账重新计入消费统计。
+        txn.stats_included = txn.txn_type not in NON_FLOW_TYPES
         if create_rule:
             self.add_rule(
                 pattern=(txn.counterparty or txn.description or "")[:500],
