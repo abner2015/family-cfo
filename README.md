@@ -104,7 +104,7 @@ family-cfo ask "这个月教育支出多少"
 | `ask "..."` | 自然语言财务问答（确定性解析） |
 | `report` | 月报/年报（md/xlsx） |
 | `record "午餐 35 元"` | 自然语言记账（默认需确认） |
-| `tx list/fix/delete/restore/resolve` | 交易查询、改分类、软删除、重复处理 |
+| `tx list/fix/retype/delete/restore/resolve` | 交易查询、改分类/类型、软删除、重复处理 |
 | `category add/list` | 自定义分类与关键词 |
 | `account list/add/balance` | 账户 |
 | `asset list/add/value/history/review` | 资产与估值 |
@@ -118,8 +118,8 @@ family-cfo ask "这个月教育支出多少"
 | `db check/config/mapping` | 完整性与配置 |
 | `demo --yes` | 写入合成示例数据（仅空账本） |
 
-全局选项：`--root`、`--db`、`--json`、`--verbose`。`--json` 需放在子命令之前，
-例如 `family-cfo --json analyze --month 2026-10`。
+全局选项：`--root`、`--db`、`--json`、`--verbose`。`--json` 可放在子命令前或后，
+例如 `family-cfo --json analyze --month 2026-10` 或 `family-cfo analyze --month 2026-10 --json`。
 
 ## 6. 飞书同步
 

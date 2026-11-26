@@ -215,6 +215,12 @@ def period_summary(
         if txn.txn_type == TxnType.REFUND and txn.direction == "inflow":
             summary.refund_minor += amount
             summary.transaction_count += 1
+            category = categories.get(txn.category_id) if txn.category_id else None
+            if category is not None and (
+                category.is_essential or category.slug in ESSENTIAL_SLUGS_FALLBACK
+            ):
+                summary.essential_expense_minor -= amount
+                summary.fixed_expense_minor -= amount
             continue
         if txn.txn_type in {TxnType.EXPENSE, TxnType.FEE} and txn.direction == "outflow":
             summary.expense_minor += amount
@@ -224,7 +230,7 @@ def period_summary(
                 if category.is_essential or category.slug in ESSENTIAL_SLUGS_FALLBACK:
                     summary.essential_expense_minor += amount
                     summary.fixed_expense_minor += amount
-    summary.expense_minor = max(summary.expense_minor - summary.refund_minor, 0)
+    summary.expense_minor = summary.expense_minor - summary.refund_minor
     summary.net_minor = summary.income_minor - summary.expense_minor
     return summary
 
@@ -259,19 +265,54 @@ def net_flow_by_category(
         )
         .order_by(func.sum(Transaction.amount_base_minor).desc())
     ).all()
-    out = []
+    # Refunds are negative expenses of their original category, never income.
+    grouped: dict[tuple[str | None, str], dict] = {}
+    refunds: dict[str | None, dict] = {}
     for name, slug, direction, txn_type, total, count in rows:
-        out.append(
+        if txn_type == TxnType.REFUND and direction == "inflow":
+            bucket = refunds.setdefault(
+                slug,
+                {"category": name or "未分类", "amount_minor": 0, "count": 0},
+            )
+            bucket["amount_minor"] += int(total or 0)
+            bucket["count"] += int(count)
+            continue
+        key = (slug, direction)
+        entry = grouped.setdefault(
+            key,
             {
                 "category": name or "未分类",
                 "slug": slug,
                 "direction": direction,
                 "txn_type": txn_type,
-                "amount_minor": int(total or 0),
-                "amount": str(from_minor(int(total or 0))),
-                "count": int(count),
-            }
+                "amount_minor": 0,
+                "count": 0,
+            },
         )
+        entry["amount_minor"] += int(total or 0)
+        entry["count"] += int(count)
+
+    for slug, refund in refunds.items():
+        key = (slug, "outflow")
+        entry = grouped.get(key)
+        if entry is None:
+            entry = {
+                "category": refund["category"],
+                "slug": slug,
+                "direction": "outflow",
+                "txn_type": TxnType.REFUND,
+                "amount_minor": 0,
+                "count": 0,
+            }
+            grouped[key] = entry
+        entry["amount_minor"] -= refund["amount_minor"]
+        entry["count"] += refund["count"]
+
+    out = []
+    for entry in grouped.values():
+        entry["amount"] = str(from_minor(entry["amount_minor"]))
+        out.append(entry)
+    out.sort(key=lambda item: item["amount_minor"], reverse=True)
     return out
 
 
@@ -420,13 +461,15 @@ def build_metrics(
         else None
     )
 
-    liabilities = list(
-        session.scalars(
+    liabilities = [
+        l
+        for l in session.scalars(
             select(Liability).where(
                 Liability.household_id == household_id, Liability.is_active.is_(True)
             )
         )
-    )
+        if l.currency == settings.currency
+    ]
     monthly_debt_service = sum(l.monthly_payment_minor for l in liabilities)
     income_values = []
     for offset in range(1, 4):
@@ -457,6 +500,8 @@ def build_metrics(
         if position.quantity <= 0:
             continue
         product = session.get(InvestmentProduct, position.product_id)
+        if product is not None and product.currency != settings.currency:
+            continue
         ptype = product.product_type if product else "other"
         value = position.market_value_minor if position.market_value_minor is not None else position.cost_minor
         by_type[ptype] = by_type.get(ptype, 0) + value
@@ -606,7 +651,7 @@ def build_metrics(
             "%",
             "流动资产 / 总资产（自住房不计入流动资产）",
             ["accounts", "assets"],
-            status="actual" if sheet.has_data else "unavailable",
+            status="actual" if (sheet.has_data and sheet.total_assets_minor) else "unavailable",
         ),
         Metric(
             "emergency_months",

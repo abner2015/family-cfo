@@ -23,6 +23,7 @@ from ..database.audit import record_audit
 from ..database.base import Database
 from ..database.models import ImportBatch, RawTransaction
 from ..database.init import get_household
+from sqlalchemy.exc import IntegrityError
 from ..transactions.classify import RuleClassifier
 from ..transactions.service import TransactionService
 from ..assets.accounts import AccountService
@@ -171,6 +172,7 @@ class ImportService:
 
         existing = self._find_batch(file_hash)
         if existing is not None:
+            self._relocate(path, "processed")
             return ImportReport(
                 file=str(path),
                 status="duplicate",
@@ -195,33 +197,56 @@ class ImportService:
         archive_path = self._archive(path)
         batch_id = new_id("batch")
         started = datetime.now().replace(microsecond=0)
-        with self.db.session() as session:
-            household = get_household(session)
-            batch = ImportBatch(
-                id=batch_id,
-                household_id=household.id,
-                file_name=path.name,
-                stored_path=str(path),
-                archive_path=str(archive_path),
-                file_hash=file_hash,
-                file_size=size,
-                adapter=adapter.name,
-                detected_platform=adapter.platform,
-                status=ImportStatus.IMPORTING,
-                total_rows=adapter_result.total_rows,
-                started_at=started,
-            )
-            session.add(batch)
-            session.flush()
+        try:
+            with self.db.session() as session:
+                household = get_household(session)
+                batch = ImportBatch(
+                    id=batch_id,
+                    household_id=household.id,
+                    file_name=path.name,
+                    stored_path=str(path),
+                    archive_path=str(archive_path),
+                    file_hash=file_hash,
+                    file_size=size,
+                    adapter=adapter.name,
+                    detected_platform=adapter.platform,
+                    status=ImportStatus.IMPORTING,
+                    total_rows=adapter_result.total_rows,
+                    started_at=started,
+                )
+                session.add(batch)
+                session.flush()
 
-            report = self._persist(
-                session,
-                household_id=household.id,
-                batch=batch,
-                adapter_result=adapter_result,
-                adapter=adapter,
-                account_ref=account,
-                actor=actor,
+                report = self._persist(
+                    session,
+                    household_id=household.id,
+                    batch=batch,
+                    adapter_result=adapter_result,
+                    adapter=adapter,
+                    account_ref=account,
+                    actor=actor,
+                )
+        except IntegrityError:
+            # Another process inserted the same file between our hash check and
+            # this insert.  The unique (household, file_hash) constraint is the
+            # final guard; report it as a duplicate instead of crashing.
+            existing = self._find_batch(file_hash)
+            if existing is None:
+                raise
+            self._relocate(path, "processed")
+            return ImportReport(
+                file=str(path),
+                status="duplicate",
+                batch_id=existing.id,
+                platform=existing.detected_platform,
+                adapter=existing.adapter,
+                total_rows=existing.total_rows,
+                imported=existing.imported_rows,
+                duplicates=existing.duplicate_rows,
+                failed=existing.failed_rows,
+                period=existing.period,
+                archive_path=existing.archive_path,
+                message="文件已被其他进程导入（唯一约束去重），未重复处理。",
             )
 
         if report.status in {"imported"}:

@@ -78,6 +78,11 @@ class RuleClassifier:
     def classify(self, txn: Transaction) -> Classification:
         if txn.category_id:
             return Classification(txn.category_id, 10000, "already_categorized")
+        if txn.txn_type == TxnType.REFUND:
+            # A refund inherits the original purchase's category only after
+            # reconciliation; guessing an income category here would corrupt
+            # the expense breakdown.
+            return Classification(None, 0, "refund_wait_link")
 
         if txn.txn_type in INTERNAL_TYPE_CATEGORY:
             slug = INTERNAL_TYPE_CATEGORY[txn.txn_type]
@@ -109,7 +114,10 @@ class RuleClassifier:
             txn.category_id = result.category_id
         elif txn.txn_type in EXPENSE_TYPES or txn.txn_type in {TxnType.INCOME, TxnType.REFUND}:
             txn.status = TxnStatus.PENDING_REVIEW
-            txn.review_reason = txn.review_reason or REVIEW_UNCATEGORIZED
+            if txn.txn_type == TxnType.REFUND:
+                txn.review_reason = txn.review_reason or "refund_unlinked"
+            else:
+                txn.review_reason = txn.review_reason or REVIEW_UNCATEGORIZED
         return result
 
     # ----------------------------------------------------------------- helpers

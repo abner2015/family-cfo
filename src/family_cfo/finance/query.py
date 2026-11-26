@@ -184,6 +184,25 @@ def answer_question(question: str, session: Session, settings: Settings) -> Quer
         base.suggestions = _SUGGESTIONS
         return base
 
+    # Health diagnosis
+    if "健康" in text:
+        from .health import diagnose
+
+        report = diagnose(session, settings, period=periods[-1])
+        base.intent = "health"
+        base.metric = "health_score"
+        base.value = f"{report.score}" if report.score is not None else None
+        base.answer = (
+            f"{label} 财务健康：{report.grade}"
+            + (f"（{report.score}/100）" if report.score is not None else "（数据不足）")
+            + "。"
+        )
+        base.details = [f.as_dict() for f in report.findings]
+        base.source = ["accounts", "assets", "liabilities", "transactions"]
+        if report.score is None:
+            base.data_status = "unavailable"
+        return base
+
     # Net worth / assets / liabilities
     if any(word in text for word in ("净资产", "总资产", "总负债")):
         sheet = balance_sheet(session, household_id, as_of=today_local(settings.timezone), settings=settings)

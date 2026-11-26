@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.config import Settings
-from ..core.dates import previous_period, today_local
+from ..core.dates import month_end, previous_period, today_local
 from ..core.money import pct, ratio
 from ..database.init import get_household
 from ..database.models import Liability, Transaction, TxnStatus
@@ -133,13 +133,15 @@ def diagnose(session: Session, settings: Settings, *, period: str, as_of: date |
         income_values.append(summary.income_minor)
     avg_income = sum(income_values) // len(income_values) if income_values else 0
 
-    liabilities = list(
-        session.scalars(
+    liabilities = [
+        l
+        for l in session.scalars(
             select(Liability).where(
                 Liability.household_id == household_id, Liability.is_active.is_(True)
             )
         )
-    )
+        if l.currency == settings.currency
+    ]
     monthly_debt = sum(l.monthly_payment_minor for l in liabilities)
 
     findings: list[Finding] = []
@@ -302,6 +304,7 @@ def diagnose(session: Session, settings: Settings, *, period: str, as_of: date |
 
     # 6. Investment concentration
     portfolio = InvestmentService(session, settings).portfolio()
+    included_positions = [p for p in portfolio.positions if p.currency == settings.currency]
     total_investment = portfolio.market_value_minor
     if total_investment <= 0:
         findings.append(
@@ -319,7 +322,7 @@ def diagnose(session: Session, settings: Settings, *, period: str, as_of: date |
                 if position.market_value_minor is not None
                 else position.cost_minor
             )
-            for position in portfolio.positions
+            for position in included_positions
         )
         concentration = ratio(largest, total_investment)
         status = GOOD if concentration <= Decimal("0.5") else WATCH if concentration <= Decimal("0.7") else RISK
@@ -340,6 +343,10 @@ def diagnose(session: Session, settings: Settings, *, period: str, as_of: date |
             Transaction.household_id == household_id,
             Transaction.occurred_at
             >= datetime.combine(date.fromisoformat(f"{period}-01"), time.min),
+            Transaction.occurred_at
+            <= datetime.combine(
+                month_end(period), time.max.replace(microsecond=0)
+            ),
             Transaction.status == TxnStatus.PENDING_REVIEW,
             Transaction.is_deleted.is_(False),
         )

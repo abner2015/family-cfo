@@ -114,6 +114,12 @@ class AlipayAdapter:
                 if key and key in type_text:
                     txn_type = value
                     break
+        if "余额宝" in f"{type_text} {description}":
+            # 余额宝转入/转出 are movements between Alipay balance and Yu'ebao.
+            if "转出" in f"{type_text} {description}":
+                txn_type = TxnType.INVESTMENT_SELL
+            else:
+                txn_type = TxnType.INVESTMENT_BUY
         review = None
         if "退款" in type_text or "退款" in status_text:
             if direction == Direction.INFLOW:
@@ -135,6 +141,15 @@ class AlipayAdapter:
                 txn_type = TxnType.UNKNOWN
                 status = TxnStatus.PENDING_REVIEW
                 review = review or "unknown_type"
+            elif txn_type in {TxnType.INVESTMENT_SELL, TxnType.TOPUP} or "转出" in type_text:
+                # Money coming back to the Alipay balance.
+                direction = Direction.INFLOW
+            elif txn_type in {
+                TxnType.INVESTMENT_BUY,
+                TxnType.WITHDRAWAL,
+                TxnType.CREDIT_CARD_REPAYMENT,
+            }:
+                direction = Direction.OUTFLOW
         if txn_type is None:
             txn_type = TxnType.INCOME if direction == Direction.INFLOW else TxnType.EXPENSE
         account_hint = "支付宝余额"

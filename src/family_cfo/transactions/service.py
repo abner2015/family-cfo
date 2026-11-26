@@ -8,11 +8,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..core.config import Settings
 from ..core.constants import (
+    NON_FLOW_TYPES,
+    CategoryKind,
     Direction,
     REVIEW_DUPLICATE,
     REVIEW_UNCATEGORIZED,
@@ -127,6 +129,8 @@ class TransactionService:
             if status == TxnStatus.CONFIRMED:
                 status = TxnStatus.PENDING_REVIEW
             review_reason = review_reason or "reversal_unlinked"
+        elif txn_type in NON_FLOW_TYPES:
+            stats_included = False
         txn_currency = (currency or self.settings.currency).upper()
         if member_id is None:
             member_id = self._default_member_id()
@@ -176,6 +180,7 @@ class TransactionService:
                 Transaction.dedupe_key == key,
                 Transaction.source_platform == source_platform,
                 Transaction.is_deleted.is_(False),
+                Transaction.status != TxnStatus.VOID,
                 Transaction.occurred_at >= occurred - window,
                 Transaction.occurred_at <= occurred + window,
             )
@@ -270,7 +275,12 @@ class TransactionService:
         if status:
             stmt = stmt.where(Transaction.status == status)
         if only_review:
-            stmt = stmt.where(Transaction.status == TxnStatus.PENDING_REVIEW)
+            stmt = stmt.where(
+                or_(
+                    Transaction.status == TxnStatus.PENDING_REVIEW,
+                    Transaction.review_reason.is_not(None),
+                )
+            )
         if account_id:
             stmt = stmt.where(Transaction.account_id == account_id)
         if category_id:
@@ -339,6 +349,66 @@ class TransactionService:
             before=before,
             after=self.to_dict(txn),
             detail=f"categorize:{category.slug}",
+        )
+        self.session.flush()
+        return txn
+
+    def retype(
+        self,
+        txn_id: str,
+        *,
+        txn_type: str,
+        direction: str | None = None,
+        stats_included: bool | None = None,
+        reason: str,
+        actor: str = "cli",
+    ) -> Transaction:
+        """Correct a misclassified transaction (e.g. a loan recorded as transfer).
+
+        Type changes are authoritative for reporting: non-flow types are
+        excluded automatically, flow types are included unless told otherwise.
+        """
+        if not reason.strip():
+            raise ValidationError("修改交易类型必须填写原因（审计要求）")
+        if txn_type not in {t.value for t in TxnType}:
+            raise ValidationError(f"非法交易类型: {txn_type}")
+        txn = self.get(txn_id)
+        before = self.to_dict(txn)
+        txn.txn_type = txn_type
+        if direction is not None:
+            if direction not in {Direction.INFLOW, Direction.OUTFLOW}:
+                raise ValidationError(f"非法方向: {direction}")
+            txn.direction = direction
+        if stats_included is None:
+            stats_included = txn_type not in NON_FLOW_TYPES
+        txn.stats_included = stats_included
+        txn.status = TxnStatus.CONFIRMED if stats_included else txn.status
+        if txn.status == TxnStatus.PENDING_REVIEW:
+            txn.status = TxnStatus.CONFIRMED
+        txn.review_reason = None
+        txn.transfer_group_id = None
+        txn.duplicate_of_id = None
+        if txn.category_id:
+            category = self.session.get(TransactionCategory, txn.category_id)
+            if (
+                category is not None
+                and category.kind == CategoryKind.TRANSFER
+                and txn_type not in NON_FLOW_TYPES
+            ):
+                # A transfer category is wrong for a real expense/income row.
+                txn.category_id = None
+                txn.status = TxnStatus.PENDING_REVIEW
+                txn.review_reason = REVIEW_UNCATEGORIZED
+        record_audit(
+            self.session,
+            household_id=self.household_id,
+            action="update",
+            entity_type="transaction",
+            entity_id=txn.id,
+            before=before,
+            after=self.to_dict(txn),
+            detail=f"retype:{txn_type}; reason={reason}",
+            actor=actor,
         )
         self.session.flush()
         return txn

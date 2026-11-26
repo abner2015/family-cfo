@@ -51,7 +51,7 @@ COLLECTING ──有账单──> IMPORTING ──> RECONCILING ──> READY_TO
 ## 4. 常用 JSON 取值
 
 ```bash
-family-cfo analyze --month 2026-10 --json
+family-cfo --json analyze --month 2026-10
 ```
 
 - 收入/支出/结余：`summary.income_minor` / `expense_minor` / `net_minor`（单位：分）

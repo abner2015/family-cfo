@@ -116,6 +116,7 @@ class PlanningService:
             priority=priority,
             risk_tolerance=risk_tolerance,
             assumptions=assumptions,
+            status="achieved" if current_minor >= target_minor else "active",
         )
         self.session.add(goal)
         self.session.flush()
@@ -147,8 +148,11 @@ class PlanningService:
         goal = self.get(ref)
         before = {"current_minor": goal.current_minor}
         goal.current_minor = to_minor(current, self.settings.currency)
-        if goal.current_minor >= goal.target_minor:
-            goal.status = GoalStatus.ACHIEVED
+        goal.status = (
+            GoalStatus.ACHIEVED
+            if goal.current_minor >= goal.target_minor
+            else GoalStatus.ACTIVE
+        )
         record_audit(
             self.session,
             household_id=self.household_id,

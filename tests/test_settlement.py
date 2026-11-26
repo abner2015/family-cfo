@@ -18,6 +18,15 @@ from family_cfo.transactions.reconcile import Reconciler
 from family_cfo.transactions.service import TransactionService
 
 
+def _resolve_internal_reviews(session, settings):
+    from family_cfo.transactions.service import TransactionService
+
+    service = TransactionService(session, settings)
+    for txn in service.list(period="2026-10"):
+        if txn.review_reason in {"ambiguous_transfer", "internal_flow_candidate"} and not txn.transfer_group_id:
+            service.retype(txn.id, txn_type=txn.txn_type, reason="测试确认")
+
+
 def _pending_txn(session, settings, amount_minor=12345):
     account = AccountService(session, settings).get("微信零钱")
     return TransactionService(session, settings).create(
@@ -56,6 +65,7 @@ def test_importing_wechat_satisfies_one_expected_source(session, settings, impor
 def test_mark_missing_requires_reason_and_unblocks(session, settings, import_fixture):
     import_fixture("wechat_sample.csv")
     Reconciler(session, settings, period="2026-10").run()
+    _resolve_internal_reviews(session, settings)
     service = SettlementService(session, settings)
     with pytest.raises(ValidationError):
         service.mark_source("2026-10", "alipay", status="missing", reason=" ")
@@ -78,6 +88,7 @@ def test_close_blocked_without_conditions(session, settings, import_fixture):
 def test_close_with_override_records_audit_and_snapshot(session, settings, import_fixture):
     import_fixture("wechat_sample.csv")
     Reconciler(session, settings, period="2026-10").run()
+    _resolve_internal_reviews(session, settings)
     service = SettlementService(session, settings)
     record = service.close("2026-10", override_reason="已人工确认缺失渠道")
     assert record.status == "CLOSED"
@@ -96,6 +107,7 @@ def test_close_with_override_records_audit_and_snapshot(session, settings, impor
 def test_pending_policy_suspends_transactions(session, settings, import_fixture):
     import_fixture("wechat_sample.csv")
     Reconciler(session, settings, period="2026-10").run()
+    _resolve_internal_reviews(session, settings)
     service = SettlementService(session, settings)
     service.mark_source("2026-10", "alipay", status="missing", reason="未使用")
     service.mark_source("2026-10", "bank", status="missing", reason="未使用")
@@ -111,6 +123,7 @@ def test_pending_policy_suspends_transactions(session, settings, import_fixture)
 def test_reopen_requires_reason_and_keeps_history(session, settings, import_fixture):
     import_fixture("wechat_sample.csv")
     Reconciler(session, settings, period="2026-10").run()
+    _resolve_internal_reviews(session, settings)
     service = SettlementService(session, settings)
     service.mark_source("2026-10", "alipay", status="missing", reason="未使用")
     service.mark_source("2026-10", "bank", status="missing", reason="未使用")
@@ -131,6 +144,7 @@ def test_reopen_requires_reason_and_keeps_history(session, settings, import_fixt
 def test_cannot_close_twice(session, settings, import_fixture):
     import_fixture("wechat_sample.csv")
     Reconciler(session, settings, period="2026-10").run()
+    _resolve_internal_reviews(session, settings)
     service = SettlementService(session, settings)
     service.mark_source("2026-10", "alipay", status="missing", reason="未使用")
     service.mark_source("2026-10", "bank", status="missing", reason="未使用")
@@ -142,6 +156,7 @@ def test_cannot_close_twice(session, settings, import_fixture):
 def test_closed_month_with_new_pending_is_flagged(session, settings, import_fixture):
     import_fixture("wechat_sample.csv")
     Reconciler(session, settings, period="2026-10").run()
+    _resolve_internal_reviews(session, settings)
     service = SettlementService(session, settings)
     service.mark_source("2026-10", "alipay", status="missing", reason="未使用")
     service.mark_source("2026-10", "bank", status="missing", reason="未使用")
@@ -176,3 +191,30 @@ def test_duplicate_suspect_blocks_close(session, settings, import_fixture):
     evaluation = service.evaluate("2026-10")
     duplicate_item = next(i for i in evaluation.items if i.key == "duplicates")
     assert duplicate_item.passed is False
+
+
+def test_automation_reminder_never_closes_period(db, settings, import_fixture, session):
+    from family_cfo.automation.tasks import run_job
+    from family_cfo.database.models import Settlement
+
+    import_fixture("wechat_sample.csv")
+    Reconciler(session, settings, period="2026-10").run()
+    session.commit()
+    run_job("monthly_close_reminder", db, settings, period="2026-10")
+    record = session.scalar(select(Settlement).where(Settlement.period == "2026-10"))
+    assert record is not None
+    assert record.status != "CLOSED"
+
+
+def test_unreviewed_single_sided_transfer_blocks_close(session, settings, import_fixture):
+    import_fixture("wechat_sample.csv")
+    Reconciler(session, settings, period="2026-10").run()
+    service = SettlementService(session, settings)
+    service.mark_source("2026-10", "alipay", status="missing", reason="未使用")
+    service.mark_source("2026-10", "bank", status="missing", reason="未使用")
+    evaluation = service.evaluate("2026-10")
+    item = next(i for i in evaluation.items if i.key == "transfers_reviewed")
+    assert item.passed is False
+    with pytest.raises(SettlementError) as exc:
+        service.close("2026-10")
+    assert "单边转账" in str(exc.value)

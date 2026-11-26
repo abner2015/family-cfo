@@ -91,7 +91,7 @@ def _review_items(session: Session, settings: Settings, period: str) -> dict:
             "category": categories.get(t.category_id, "未分类"),
         }
         for t in txns
-        if t.status == TxnStatus.PENDING_REVIEW
+        if t.status == TxnStatus.PENDING_REVIEW or t.review_reason is not None
     ]
     duplicates = [p for p in pending if p["reason"] == REVIEW_DUPLICATE]
     return {

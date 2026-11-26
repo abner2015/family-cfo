@@ -29,6 +29,7 @@ class AssetLine:
     owned_value_minor: int
     ownership_share_bps: int
     cost_minor: int
+    currency: str
     is_liquid: bool
     is_primary_residence: bool
     valuation_date: str | None
@@ -45,11 +46,11 @@ class AssetLine:
             "owned_value": format_money(self.owned_value_minor, currency),
             "owned_value_minor": self.owned_value_minor,
             "ownership_share": str(Decimal(self.ownership_share_bps) / 10000),
-            "cost": format_money(self.cost_minor, currency),
+            "cost": format_money(self.cost_minor, self.currency),
             "gain": format_money(
                 self.owned_value_minor
                 - int(self.cost_minor * self.ownership_share_bps / 10000),
-                currency,
+                self.currency,
             ),
             "liquid": self.is_liquid,
             "primary_residence": self.is_primary_residence,
@@ -235,6 +236,7 @@ class AssetService:
                     ),
                     ownership_share_bps=asset.ownership_share_bps,
                     cost_minor=asset.acquisition_cost_minor,
+                    currency=asset.currency,
                     is_liquid=asset.is_liquid,
                     is_primary_residence=asset.is_primary_residence,
                     valuation_date=asset.valuation_date.isoformat() if asset.valuation_date else None,
@@ -255,7 +257,9 @@ class AssetService:
         )
 
     def summary(self) -> dict:
-        lines = self.list()
+        all_lines = self.list()
+        lines = [line for line in all_lines if line.currency == self.settings.currency]
+        excluded = sorted({line.currency for line in all_lines} - {self.settings.currency})
         total = sum(line.owned_value_minor for line in lines)
         liquid = sum(
             line.owned_value_minor
@@ -274,6 +278,7 @@ class AssetService:
                 for k, v in sorted(by_type.items(), key=lambda kv: kv[1], reverse=True)
             },
             "assets": [line.as_dict(self.settings.currency) for line in lines],
+            "excluded_currencies": excluded,
             "stale": [line.name for line in lines if line.stale],
         }
 

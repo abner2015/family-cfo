@@ -258,3 +258,72 @@ def test_pull_budgets_amount_edit_without_version_bump(sync_service, session, mo
     assert report.updated == 1
     assert service.active("2026-10").version == 2
     assert service.active("2026-10").total_amount_minor == 180000
+
+
+def test_failed_push_is_recorded_without_touching_ledger(sync_service, session, monkeypatch):
+    from family_cfo.core.errors import FeishuError
+    from family_cfo.database.models import SyncRecord
+
+    goal = PlanningService(session, sync_service.settings).add_goal(name="应急金", target="60000")
+    session.commit()
+    before = goal.target_minor
+
+    def boom(*args, **kwargs):
+        raise FeishuError("simulated failure")
+
+    monkeypatch.setattr(sync_service.client, "create_record", boom)
+    report = sync_service.push("goals")
+    assert report.failed
+    assert goal.target_minor == before
+    record = session.scalar(
+        select(SyncRecord).where(
+            SyncRecord.entity_id == goal.id, SyncRecord.direction == "push"
+        )
+    )
+    assert record.status == "failed"
+    assert "simulated failure" in (record.last_error or "")
+
+
+def test_resolve_conflict_remote_wins(sync_service, session, mock_feishu):
+    goal = PlanningService(session, sync_service.settings).add_goal(
+        name="教育金", target="200000", current="50000"
+    )
+    session.commit()
+    sync_service.push("goals")
+    record = mock_feishu.find_record("FamilyCFO_目标", "业务ID", goal.id)
+    mock_feishu.edit_remote("FamilyCFO_目标", record["record_id"], {"当前金额": 60000.0})
+    goal.current_minor = 70000
+    session.commit()
+    conflict = sync_service.push("goals")
+    assert conflict.conflicts
+    resolved = sync_service.resolve("goals", goal.id, strategy="remote")
+    session.expire_all()
+    assert resolved.updated == 1
+    assert goal.current_minor == 6000000
+
+
+def test_pull_budgets_ignores_old_versions(sync_service, session, mock_feishu, settings):
+    service = BudgetService(session, settings)
+    service.set_budget(period="2026-10", items=[{"category": "餐饮", "amount": "1000"}])
+    session.commit()
+    sync_service.push("budgets")
+    service.set_budget(period="2026-10", items=[{"category": "餐饮", "amount": "1500"}])
+    session.commit()
+    sync_service.push("budgets")
+    # Both v1 and v2 rows now exist remotely; pull must compare against v2 only.
+    report = sync_service.pull("budgets")
+    assert not report.failed
+    assert report.conflicts == []
+    assert service.active("2026-10").version == 2
+
+
+def test_client_token_is_deterministic_uuid4():
+    import uuid
+
+    from family_cfo.integrations.feishu.sync import _client_token
+
+    token = _client_token("transactions", "txn_1")
+    assert token == _client_token("transactions", "txn_1")
+    assert token != _client_token("transactions", "txn_2")
+    parsed = uuid.UUID(token)
+    assert parsed.version == 4

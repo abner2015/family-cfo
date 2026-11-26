@@ -305,3 +305,154 @@ def test_custom_category_and_keywords_are_used(session, settings):
     assert txn.category_id == category.id
     with pytest.raises(ValidationError):
         svc.create_category(name="宠物", kind="expense")
+
+
+def test_transfer_hint_does_not_match_salary_and_rent(session, settings):
+    bank = _account(session, settings, "银行卡")
+    _create(
+        session, settings, account=bank, direction="inflow", txn_type="income",
+        amount_minor=500000, counterparty="公司", description="工资", external_id="SAL1",
+    )
+    _create(
+        session, settings, account=bank, direction="outflow", txn_type="expense",
+        amount_minor=500000, counterparty="房东", description="转账给房东", external_id="RENT1",
+    )
+    result = Reconciler(session, settings, period="2026-10").run()
+    assert result.transfers_matched == 0
+    assert all(t.stats_included for t in session.scalars(select(Transaction)))
+
+
+def test_bank_platform_clearing_is_flagged_not_double_counted(session, settings):
+    bank = _account(session, settings, "银行卡")
+    platform = _create(
+        session, settings, account=_account(session, settings), source_platform="wechat",
+        direction="outflow", amount_minor=10000, counterparty="美团", description="外卖",
+        external_id="WX-CLEAR",
+    ).transaction
+    clearing = _create(
+        session, settings, account=bank, source_platform="bank",
+        direction="outflow", amount_minor=10000, counterparty="财付通-美团", description="快捷支付",
+        external_id="BK-CLEAR",
+    ).transaction
+    result = Reconciler(session, settings, period="2026-10").run()
+    assert result.clearing_flagged == 1
+    assert clearing.stats_included is False
+    assert clearing.duplicate_of_id == platform.id
+    assert clearing.review_reason == "platform_clearing"
+    assert platform.stats_included is True  # keep the detailed platform record
+
+
+def test_bank_clearing_without_platform_bill_stays_counted(session, settings):
+    bank = _account(session, settings, "银行卡")
+    txn = _create(
+        session, settings, account=bank, source_platform="bank",
+        direction="outflow", amount_minor=20000, counterparty="财付通-某商户",
+        description="快捷支付", external_id="BK-ONLY",
+    ).transaction
+    result = Reconciler(session, settings, period="2026-10").run()
+    assert result.clearing_flagged == 0
+    assert txn.stats_included is True
+
+
+def test_credit_card_purchase_mirrored_in_alipay_is_flagged(session, settings):
+    card = _account(session, settings, "信用卡")
+    _create(
+        session, settings, account=card, source_platform="credit_card",
+        direction="outflow", amount_minor=3200, counterparty="星巴克",
+        description="咖啡", external_id="CC1",
+    )
+    _create(
+        session, settings, account=_account(session, settings), source_platform="alipay",
+        direction="outflow", amount_minor=3200, counterparty="星巴克",
+        description="咖啡", external_id="ALI1",
+    )
+    result = Reconciler(session, settings, period="2026-10").run()
+    assert result.duplicates_flagged == 1
+    flagged = [t for t in session.scalars(select(Transaction)) if not t.stats_included]
+    assert len(flagged) == 1
+
+
+def test_retype_transfer_to_expense_is_counted(session, settings):
+    from family_cfo.finance.metrics import period_summary
+
+    txn = _create(
+        session, settings, txn_type="transfer", amount_minor=50000,
+        counterparty="朋友", description="转账",
+    ).transaction
+    assert txn.stats_included is False
+    service = TransactionService(session, settings)
+    updated = service.retype(txn.id, txn_type="expense", reason="实际是借款支出")
+    assert updated.stats_included is True
+    assert updated.category_id is None
+    assert updated.status == "confirmed"
+    summary = period_summary(session, service.household_id, "2026-10")
+    assert summary.expense_minor == 50000
+
+
+def test_bank_clearing_loses_to_platform_when_merchant_matches(session, settings):
+    bank = _account(session, settings, "银行卡")
+    platform = _create(
+        session, settings, account=_account(session, settings), source_platform="wechat",
+        direction="outflow", amount_minor=10000, counterparty="美团", description="外卖",
+        external_id="WX-C2",
+    ).transaction
+    clearing = _create(
+        session, settings, account=bank, source_platform="bank",
+        direction="outflow", amount_minor=10000, counterparty="美团", description="财付通快捷支付",
+        external_id="BK-C2",
+    ).transaction
+    result = Reconciler(session, settings, period="2026-10").run()
+    assert result.duplicates_flagged + result.clearing_flagged >= 1
+    assert clearing.stats_included is False
+    assert platform.stats_included is True
+
+
+def test_transfer_across_month_boundary_is_matched(session, settings):
+    bank = _account(session, settings, "银行卡")
+    out_txn = _create(
+        session, settings, account=bank, source_platform="bank",
+        occurred_at="2026-10-31 23:30:00", direction="outflow", txn_type="transfer",
+        amount_minor=100000, counterparty="本人微信", description="转账", external_id="B1",
+    ).transaction
+    in_txn = _create(
+        session, settings, account=_account(session, settings), source_platform="wechat",
+        occurred_at="2026-11-01 00:10:00", direction="inflow", txn_type="topup",
+        amount_minor=100000, counterparty="零钱充值", description="充值", external_id="W1",
+    ).transaction
+    result = Reconciler(session, settings, period="2026-10").run()
+    assert result.transfers_matched == 1
+    assert out_txn.transfer_group_id == in_txn.transfer_group_id
+
+
+def test_refund_links_to_previous_month_expense(session, settings):
+    original = _create(
+        session, settings, occurred_at="2026-10-28 12:00:00", amount_minor=50000,
+        counterparty="京东", description="购物", external_id="OCT-BUY",
+    ).transaction
+    refund = _create(
+        session, settings, occurred_at="2026-11-02 12:00:00", direction="inflow",
+        txn_type="refund", amount_minor=50000, counterparty="京东", description="退款",
+        external_id="NOV-REF",
+    ).transaction
+    result = Reconciler(session, settings, period="2026-11").run()
+    assert result.refunds_linked == 1
+    assert refund.refund_of_id == original.id
+    assert refund.status == "confirmed"
+
+
+def test_credit_card_clearing_row_does_not_double_count(session, settings):
+    card = _account(session, settings, "信用卡")
+    platform = _create(
+        session, settings, account=_account(session, settings), source_platform="alipay",
+        direction="outflow", amount_minor=6600, counterparty="滴滴", description="打车",
+        external_id="ALI-CC",
+    ).transaction
+    clearing = _create(
+        session, settings, account=card, source_platform="credit_card",
+        direction="outflow", amount_minor=6600, counterparty="支付宝-滴滴", description="快捷支付",
+        external_id="CC-CLEAR",
+    ).transaction
+    result = Reconciler(session, settings, period="2026-10").run()
+    assert result.clearing_flagged == 1
+    assert clearing.stats_included is False
+    assert platform.stats_included is True

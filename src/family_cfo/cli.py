@@ -7,6 +7,7 @@ prints results and maps errors to exit codes.
 from __future__ import annotations
 
 import json
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
@@ -16,6 +17,7 @@ from typing import Any, Optional
 
 import typer
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from .assets.accounts import AccountService, format_account
 from .assets.service import AssetService
@@ -120,6 +122,9 @@ def friendly_errors():
                 err=True,
             )
         raise typer.Exit(exit_code_for(exc))
+    except SQLAlchemyError as exc:
+        typer.secho(f"数据库错误: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
     except ValueError as exc:
         typer.secho(f"错误: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(2)
@@ -272,7 +277,7 @@ def doctor(ctx: typer.Context) -> None:
     state: CliState = ctx.obj
     settings = _settings(state)
     info: dict[str, Any] = {
-        "python": f"{__import__('sys').version.split()[0]}",
+        "python": f"{sys.version.split()[0]}",
         "project_root": str(settings.project_root),
         "data_dir": str(settings.data_dir),
         "database": str(settings.db_path),
@@ -684,6 +689,44 @@ def tx_fix(
                 txn_id, category_row.id, create_rule=rule
             )
             _emit(state, {"id": txn.id, "category": category_row.name, "status": txn.status})
+
+
+@tx_app.command("retype")
+def tx_retype(
+    ctx: typer.Context,
+    txn_id: str = typer.Argument(...),
+    txn_type: str = typer.Option(..., "--type", help="expense/income/transfer/loan_repay/..."),
+    direction: Optional[str] = typer.Option(None, "--direction", help="inflow/outflow"),
+    include: bool = typer.Option(False, "--include", help="强制计入收支统计"),
+    exclude: bool = typer.Option(False, "--exclude", help="强制排除出收支统计"),
+    reason: str = typer.Option(..., "--reason", help="修正原因（审计必填）"),
+) -> None:
+    """修正交易类型/方向（用于把误判的转账改回支出等）。"""
+    if include and exclude:
+        raise typer.BadParameter("--include 与 --exclude 不能同时使用")
+    state: CliState = ctx.obj
+    with friendly_errors():
+        settings = _settings(state)
+        db = _db(state)
+        stats = True if include else False if exclude else None
+        with db.session() as session:
+            txn = TransactionService(session, settings).retype(
+                txn_id,
+                txn_type=txn_type,
+                direction=direction,
+                stats_included=stats,
+                reason=reason,
+            )
+            _emit(
+                state,
+                {
+                    "id": txn.id,
+                    "type": txn.txn_type,
+                    "direction": txn.direction,
+                    "stats_included": txn.stats_included,
+                    "status": txn.status,
+                },
+            )
 
 
 @tx_app.command("delete")
@@ -1621,7 +1664,15 @@ def _parse_item(value: str) -> dict:
 
 
 def main() -> None:
-    app()
+    """Console entry point.
+
+    ``--json`` is a global flag, but accepting it after the subcommand is far
+    more natural; normalise it before Typer parses the argv.
+    """
+    argv = sys.argv[1:]
+    if "--json" in argv:
+        argv = ["--json", *[item for item in argv if item != "--json"]]
+    app(args=argv)
 
 
 if __name__ == "__main__":

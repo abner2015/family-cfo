@@ -227,7 +227,8 @@ class LiabilityService:
         for index in range(1, rows_to_show + 1):
             interest = int((Decimal(balance) * rate).to_integral_value(rounding=ROUND_HALF_UP))
             if liability.repayment_method == "equal_principal":
-                principal = int(Decimal(liability.principal_minor) / Decimal(total_periods))
+                periods_left = total_periods - index + 1
+                principal = int(Decimal(balance) / Decimal(periods_left))
             else:
                 payment = self._equal_installment(balance, rate, total_periods - index + 1)
                 principal = max(payment - interest, 0)
@@ -264,11 +265,18 @@ class LiabilityService:
         )
 
     def summary(self) -> dict:
-        liabilities = self.list()
+        all_liabilities = self.list()
+        liabilities = [l for l in all_liabilities if l.currency == self.settings.currency]
+        excluded = sorted(
+            {l.currency for l in all_liabilities} - {self.settings.currency}
+        )
+        ids = {l.id for l in liabilities}
         total = sum(l.balance_minor for l in liabilities)
         monthly = sum(l.monthly_payment_minor for l in liabilities)
         interest_paid = sum(
-            p.interest_minor for p in self.session.scalars(select(LiabilityPayment))
+            p.interest_minor
+            for p in self.session.scalars(select(LiabilityPayment))
+            if p.liability_id in ids
         )
         weighted_rate = (
             sum(Decimal(l.balance_minor) * Decimal(l.annual_rate_bps) for l in liabilities)
@@ -287,6 +295,7 @@ class LiabilityService:
             "monthly_payment_minor": monthly,
             "interest_paid_minor": interest_paid,
             "interest_paid": format_money(interest_paid, self.settings.currency),
+            "excluded_currencies": excluded,
             "weighted_rate": str(weighted_rate) if weighted_rate is not None else None,
             "by_type": {
                 k: {"amount": format_money(v, self.settings.currency), "amount_minor": v}

@@ -270,11 +270,14 @@ class FeishuClient:
         )
         return payload.get("data", {}).get("record", {})
 
-    def create_record(self, table_id: str, fields: dict) -> dict:
+    def create_record(
+        self, table_id: str, fields: dict, *, client_token: str | None = None
+    ) -> dict:
         payload = self.request(
             "POST",
             f"/open-apis/bitable/v1/apps/{self.settings.feishu_app_token}/tables/{table_id}/records",
             json={"fields": fields},
+            params={"client_token": client_token} if client_token else None,
         )
         return payload.get("data", {}).get("record", {})
 

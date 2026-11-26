@@ -82,31 +82,36 @@ class Portfolio:
     dividends_minor: int = 0
     fees_minor: int = 0
     currency: str = "CNY"
+    excluded_currencies: set[str] = field(default_factory=set)
+
+    def _included(self) -> list[PositionView]:
+        return [p for p in self.positions if p.currency == self.currency]
 
     @property
     def cost_minor(self) -> int:
-        return sum(p.cost_minor for p in self.positions)
+        return sum(p.cost_minor for p in self._included())
 
     @property
     def market_value_minor(self) -> int:
         return sum(
             p.market_value_minor if p.market_value_minor is not None else p.cost_minor
-            for p in self.positions
+            for p in self._included()
         )
 
     @property
     def realized_minor(self) -> int:
-        return sum(p.realized_minor for p in self.positions)
+        return sum(p.realized_minor for p in self._included())
 
     @property
     def unrealized_minor(self) -> int | None:
-        if any(p.market_value_minor is None for p in self.positions):
+        included = self._included()
+        if any(p.market_value_minor is None for p in included):
             return None
         return self.market_value_minor - self.cost_minor
 
     def as_dict(self) -> dict:
         allocation: dict[str, int] = {}
-        for position in self.positions:
+        for position in self._included():
             value = (
                 position.market_value_minor
                 if position.market_value_minor is not None
@@ -132,7 +137,8 @@ class Portfolio:
                 }
                 for k, v in sorted(allocation.items(), key=lambda kv: kv[1], reverse=True)
             },
-            "positions": [p.as_dict(self.currency) for p in self.positions],
+            "positions": [p.as_dict(p.currency) for p in self.positions],
+            "excluded_currencies": sorted(self.excluded_currencies),
             "estimated_positions": [p.name for p in self.positions if p.estimated],
         }
 
@@ -241,6 +247,14 @@ class InvestmentService:
         self.session.add(txn)
         self.session.flush()
         position = self.recompute(product.id, account_id)
+        if txn_type in {InvTxnType.BUY, InvTxnType.SELL} and position.valuation_date:
+            if trade_date > position.valuation_date:
+                # The old market value no longer describes the new quantity/cost.
+                # Require a fresh user valuation instead of showing a fake P&L.
+                position.market_value_minor = None
+                position.valuation_date = None
+                position.valuation_source = None
+                position.unrealized_pnl_minor = None
         record_audit(
             self.session,
             household_id=self.household_id,
@@ -379,6 +393,8 @@ class InvestmentService:
             product = self.session.get(InvestmentProduct, position.product_id)
             if product is None:
                 continue
+            if product.currency != self.settings.currency:
+                portfolio.excluded_currencies.add(product.currency)
             estimated = position.market_value_minor is None or position.valuation_date is None
             portfolio.positions.append(
                 PositionView(
@@ -403,6 +419,9 @@ class InvestmentService:
                 InvestmentTransaction.household_id == self.household_id
             )
         ):
+            product = self.session.get(InvestmentProduct, txn.product_id)
+            if product is not None and product.currency != self.settings.currency:
+                continue
             portfolio.fees_minor += txn.fee_minor
             if txn.txn_type == InvTxnType.DIVIDEND:
                 portfolio.dividends_minor += txn.net_minor

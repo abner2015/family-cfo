@@ -307,16 +307,28 @@ class BudgetService:
                     Transaction.is_deleted.is_(False),
                     Transaction.status != TxnStatus.VOID,
                     Transaction.stats_included.is_(True),
-                    Transaction.txn_type.in_([TxnType.EXPENSE, TxnType.FEE]),
-                    Transaction.direction == "outflow",
+                    Transaction.txn_type.in_([TxnType.EXPENSE, TxnType.FEE, TxnType.REFUND]),
                 )
             )
         )
+        expenses = [
+            t
+            for t in txns
+            if t.direction == "outflow" and t.txn_type in {TxnType.EXPENSE, TxnType.FEE}
+        ]
+        refunds = [
+            t for t in txns if t.direction == "inflow" and t.txn_type == TxnType.REFUND
+        ]
         actual_by_category: dict[str, int] = {}
-        for txn in txns:
+        for txn in expenses:
             if txn.category_id:
                 actual_by_category[txn.category_id] = (
                     actual_by_category.get(txn.category_id, 0) + txn.amount_base_minor
+                )
+        for txn in refunds:
+            if txn.category_id:
+                actual_by_category[txn.category_id] = (
+                    actual_by_category.get(txn.category_id, 0) - txn.amount_base_minor
                 )
         items = list(
             self.session.scalars(
@@ -333,18 +345,27 @@ class BudgetService:
             actual = 0
             if item.category_id:
                 budgeted_categories.add(item.category_id)
-                scope = [
-                    t
-                    for t in txns
+                spent = sum(
+                    t.amount_base_minor
+                    for t in expenses
                     if t.category_id == item.category_id
                     and (item.member_id is None or t.member_id == item.member_id)
-                ]
-                actual = sum(t.amount_base_minor for t in scope)
+                )
+                refunded = sum(
+                    t.amount_base_minor
+                    for t in refunds
+                    if t.category_id == item.category_id
+                    and (item.member_id is None or t.member_id == item.member_id)
+                )
+                actual = spent - refunded
             elif item.member_id:
-                scope = [t for t in txns if t.member_id == item.member_id]
-                actual = sum(t.amount_base_minor for t in scope)
+                spent = sum(t.amount_base_minor for t in expenses if t.member_id == item.member_id)
+                refunded = sum(t.amount_base_minor for t in refunds if t.member_id == item.member_id)
+                actual = spent - refunded
             else:
-                actual = sum(t.amount_base_minor for t in txns)
+                actual = sum(t.amount_base_minor for t in expenses) - sum(
+                    t.amount_base_minor for t in refunds
+                )
             lines.append(
                 BudgetLine(
                     category_id=item.category_id,
@@ -356,7 +377,9 @@ class BudgetService:
                     actual_minor=actual,
                 )
             )
-        total_actual = sum(t.amount_base_minor for t in txns)
+        total_actual = sum(t.amount_base_minor for t in expenses) - sum(
+            t.amount_base_minor for t in refunds
+        )
         budgeted_actual = sum(actual_by_category.get(c, 0) for c in budgeted_categories)
         report = BudgetReport(
             budget_id=budget.id,

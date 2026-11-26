@@ -9,6 +9,7 @@ from typing import Iterator
 
 from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from ..core.errors import ConfigError
 from ..core.logging import get_logger
@@ -35,6 +36,9 @@ def create_db_engine(db_path: str | Path, *, echo: bool = False) -> Engine:
         echo=echo,
         future=True,
         connect_args={"timeout": 30},
+        # CLI/Skill processes are short lived; no connections may linger and
+        # block backup/restore file swaps.
+        poolclass=NullPool,
     )
     event.listen(engine, "connect", _apply_pragmas)
     return engine

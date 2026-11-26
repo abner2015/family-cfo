@@ -218,3 +218,16 @@ def test_alembic_revision_is_stamped(db: Database):
     with db.engine.connect() as conn:
         row = conn.execute(text("SELECT version_num FROM alembic_version")).fetchall()
     assert row == [("0001_initial",)]
+
+
+def test_sqlite_pragmas_are_enabled(db: Database):
+    with db.engine.connect() as conn:
+        assert conn.exec_driver_sql("PRAGMA journal_mode").scalar().lower() == "wal"
+        assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+        assert conn.exec_driver_sql("PRAGMA busy_timeout").scalar() == 5000
+
+
+def test_data_directories_are_private(settings):
+    settings.ensure_dirs()
+    for path in (settings.data_dir, settings.archive_dir, settings.backups_dir):
+        assert path.stat().st_mode & 0o777 == 0o700

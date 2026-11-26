@@ -83,7 +83,7 @@ def test_import_alipay_bill(importer: ImportService, session):
     balance_transfer = next(t for t in txns if t.external_id == "AL004")
     assert balance_transfer.txn_type in {"topup", "investment_buy"}
     assert balance_transfer.direction == "outflow"
-    assert balance_transfer.stats_included is True  # reconcile excludes it later
+    assert balance_transfer.stats_included is False  # non-flow type
 
 
 def test_import_bank_statement(importer: ImportService, session):
@@ -260,3 +260,127 @@ def test_reversal_transaction_is_flagged_and_excluded(importer: ImportService, s
         session, session.scalar(select(Transaction)).household_id, "2026-10"
     )
     assert summary.expense_minor == 2000
+
+
+def test_concurrent_duplicate_insert_is_reported_as_duplicate(importer: ImportService):
+    first = importer.import_file(FIXTURES / "wechat_sample.csv")
+    assert first.status == "imported"
+    # Simulate the race where the hash check happens before another process
+    # commits the same file: the unique constraint must win without a crash.
+    original = importer._find_batch
+    calls = {"count": 0}
+
+    def flaky(file_hash):
+        calls["count"] += 1
+        return None if calls["count"] == 1 else original(file_hash)
+
+    importer._find_batch = flaky
+    second = importer.import_file(FIXTURES / "wechat_sample.csv")
+    assert second.status == "duplicate"
+    assert second.batch_id == first.batch_id
+
+
+def test_alipay_success_refund_column_is_resolved(importer: ImportService, settings, session):
+    content = "\n".join(
+        [
+            "支付宝交易记录明细查询",
+            "交易时间,交易分类,交易对方,商品说明,收/支,金额,收/付款方式,交易状态,交易订单号,成功退款（元）",
+            "2026-10-01 10:00:00,购物,淘宝,商品,支出,100.00,余额,交易成功,ALR1,100.00",
+            "2026-10-03 10:00:00,退款,淘宝,退款,收入,100.00,余额,退款成功,ALR2,0.00",
+        ]
+    )
+    path = settings.data_dir / "alipay_refund.csv"
+    path.write_text(content, encoding="utf-8")
+    report = importer.import_file(path)
+    assert report.imported == 2
+    original = session.scalar(select(Transaction).where(Transaction.external_id == "ALR1"))
+    assert original.status == "pending_review"
+    from family_cfo.transactions.reconcile import Reconciler
+
+    Reconciler(session, settings, period="2026-10").run()
+    assert original.status == "confirmed"
+    assert original.review_reason is None
+    refund = session.scalar(select(Transaction).where(Transaction.external_id == "ALR2"))
+    assert refund.refund_of_id == original.id
+
+
+def test_alipay_yuebao_transfer_direction(importer: ImportService, settings, session):
+    content = "\n".join(
+        [
+            "支付宝交易记录明细查询",
+            "交易时间,交易分类,交易对方,商品说明,收/支,金额,收/付款方式,交易状态,交易订单号",
+            "2026-10-01 10:00:00,充值,余额宝,余额宝-转出,不计收支,500.00,余额,交易成功,ALY1",
+        ]
+    )
+    path = settings.data_dir / "alipay_yuebao.csv"
+    path.write_text(content, encoding="utf-8")
+    importer.import_file(path)
+    txn = session.scalar(select(Transaction).where(Transaction.external_id == "ALY1"))
+    assert txn.txn_type == "investment_sell"
+    assert txn.direction == "inflow"
+    assert txn.stats_included is False
+
+
+def test_duplicate_file_in_inbox_moves_to_processed(importer: ImportService, settings, session):
+    settings.ensure_dirs()
+    first = settings.inbox_dir / "first.csv"
+    shutil.copy2(FIXTURES / "wechat_sample.csv", first)
+    importer.import_file(first)
+    again = settings.inbox_dir / "again.csv"
+    shutil.copy2(FIXTURES / "wechat_sample.csv", again)
+    report = importer.import_file(again)
+    assert report.status == "duplicate"
+    assert not again.exists()
+    assert (settings.processed_dir / "again.csv").exists()
+
+
+def test_import_legacy_xls(importer: ImportService, tmp_path: Path):
+    import csv
+
+    import xlwt
+
+    rows = list(csv.reader((FIXTURES / "wechat_sample.csv").read_text(encoding="utf-8").splitlines()))
+    book = xlwt.Workbook()
+    sheet = book.add_sheet("Sheet1")
+    for r, row in enumerate(rows):
+        for c, value in enumerate(row):
+            sheet.write(r, c, value)
+    path = tmp_path / "wechat_sample.xls"
+    book.save(str(path))
+    report = importer.import_file(path)
+    assert report.status == "imported"
+    assert report.imported == 11
+
+
+def test_overlapping_exports_are_incremental(importer: ImportService, settings, session):
+    header = "交易时间,交易类型,交易对方,商品,收/支,金额(元),支付方式,当前状态,交易单号,商户单号,备注"
+    first = settings.data_dir / "overlap1.csv"
+    first.write_text(
+        "\n".join(
+            [
+                "微信支付账单明细",
+                header,
+                "2026-10-01 10:00:00,商户消费,美团,外卖,支出,¥10.00,零钱,支付成功,OV1,,",
+                "2026-10-02 10:00:00,商户消费,美团,外卖,支出,¥20.00,零钱,支付成功,OV2,,",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    second = settings.data_dir / "overlap2.csv"
+    second.write_text(
+        "\n".join(
+            [
+                "微信支付账单明细",
+                header,
+                "2026-10-02 10:00:00,商户消费,美团,外卖,支出,¥20.00,零钱,支付成功,OV2,,",
+                "2026-10-03 10:00:00,商户消费,美团,外卖,支出,¥30.00,零钱,支付成功,OV3,,",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    one = importer.import_file(first)
+    two = importer.import_file(second)
+    assert one.imported == 2
+    assert two.imported == 1
+    assert two.duplicates == 1
+    assert len(list(session.scalars(select(Transaction)))) == 3

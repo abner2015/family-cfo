@@ -185,3 +185,133 @@ def test_cli_help_lists_required_commands():
         "automation",
     ):
         assert command in result.stdout
+
+
+def test_every_cli_command_exposes_help(tmp_path):
+    runner = CliRunner()
+    base = ["--root", str(tmp_path), "--db", str(tmp_path / "data" / "family_cfo.db")]
+    commands = [
+        "init", "doctor", "demo", "import", "scan", "reconcile", "settle",
+        "analyze", "health", "ask", "report", "record", "plan",
+    ]
+    groups = {
+        "tx": ["list", "fix", "retype", "delete", "restore", "resolve"],
+        "category": ["add", "list"],
+        "account": ["list", "add", "balance"],
+        "asset": ["list", "add", "value", "history", "review"],
+        "liability": ["list", "add", "pay", "schedule", "balance"],
+        "budget": ["set", "show", "history"],
+        "goal": ["add", "list", "progress"],
+        "invest": ["product", "buy", "sell", "dividend", "value", "portfolio"],
+        "feishu": ["status", "ensure-tables", "sync", "pull", "conflicts", "resolve"],
+        "backup": ["create", "list", "verify", "restore", "prune"],
+        "automation": ["list", "install", "run"],
+        "db": ["check", "config", "mapping"],
+    }
+    for command in commands:
+        result = runner.invoke(app, [*base, command, "--help"])
+        assert result.exit_code == 0, (command, result.output)
+    for group, subcommands in groups.items():
+        result = runner.invoke(app, [*base, group, "--help"])
+        assert result.exit_code == 0, (group, result.output)
+        for sub in subcommands:
+            result = runner.invoke(app, [*base, group, sub, "--help"])
+            assert result.exit_code == 0, (group, sub, result.output)
+
+
+def test_cli_config_never_prints_secrets(tmp_path):
+    runner = CliRunner()
+    base = ["--root", str(tmp_path), "--db", str(tmp_path / "data" / "family_cfo.db")]
+    env = {
+        "FAMILY_CFO_FEISHU_APP_ID": "cli_secret",
+        "FAMILY_CFO_FEISHU_APP_SECRET": "super-secret-value",
+        "FAMILY_CFO_FEISHU_APP_TOKEN": "app-token-value",
+    }
+    result = runner.invoke(app, [*base, "--json", "db", "config"], env=env)
+    assert result.exit_code == 0, result.output
+    assert "super-secret-value" not in result.output
+    assert "app-token-value" not in result.output
+    payload = json.loads(result.output)
+    assert payload["feishu"]["app_secret"] == "***"
+
+
+def test_no_absolute_paths_in_skill_support_files():
+    for path in SKILL_DIR.rglob("*"):
+        if path.is_file() and path.suffix in {".md", ".py", ".yaml", ".yml"}:
+            text = path.read_text(encoding="utf-8")
+            assert "/Users/" not in text, path
+            assert "/home/" not in text, path
+
+
+def test_cli_backup_restore_roundtrip(cli, tmp_path):
+    cli("init")
+    cli("import", str(FIXTURES / "wechat_sample.csv"))
+    created = cli("--json", "backup", "create")
+    assert created.exit_code == 0, created.output
+    backup_path = json.loads(created.output)["path"]
+    cli("import", str(FIXTURES / "alipay_sample.csv"))
+    before = json.loads(cli("--json", "tx", "list").output)
+    assert len(before) == 21
+    restored = cli("backup", "restore", backup_path, "--yes")
+    assert restored.exit_code == 0, restored.output
+    after = json.loads(cli("--json", "tx", "list").output)
+    assert len(after) == 11
+    verified = cli("--json", "backup", "verify", backup_path)
+    assert verified.exit_code == 0
+    assert json.loads(verified.output)["integrity"] == "ok"
+
+
+def test_cli_report_month_and_year(cli, tmp_path):
+    cli("init")
+    cli("import", str(FIXTURES / "wechat_sample.csv"))
+    monthly = cli("--json", "report", "--month", "2026-10", "--format", "md,xlsx")
+    assert monthly.exit_code == 0, monthly.output
+    monthly_payload = json.loads(monthly.output)
+    assert Path(monthly_payload["markdown"]).exists()
+    assert Path(monthly_payload["excel"]).exists()
+    annual = cli("--json", "report", "--year", "2026", "--format", "md,xlsx")
+    assert annual.exit_code == 0, annual.output
+    annual_payload = json.loads(annual.output)
+    assert Path(annual_payload["markdown"]).exists()
+    assert Path(annual_payload["excel"]).exists()
+
+
+def test_cli_end_to_end_mutations(cli):
+    assert cli("init").exit_code == 0
+    assert cli("category", "add", "宠物", "--keyword", "猫粮").exit_code == 0
+    assert cli("account", "balance", "银行卡", "--amount", "50000").exit_code == 0
+    assert cli("asset", "add", "自住房", "--value", "2000000", "--residence").exit_code == 0
+    assert cli("asset", "value", "自住房", "--value", "2100000").exit_code == 0
+    assert cli("asset", "history", "自住房").exit_code == 0
+    assert cli("liability", "add", "房贷", "--principal", "1000000", "--balance", "800000",
+               "--rate", "4.9", "--months", "240", "--payment", "6500").exit_code == 0
+    assert cli("liability", "pay", "房贷", "--principal", "2000", "--interest", "3266").exit_code == 0
+    assert cli("liability", "schedule", "房贷", "--months", "3").exit_code == 0
+    assert cli("budget", "set", "--month", "2026-10", "--item", "餐饮=1500").exit_code == 0
+    assert cli("budget", "show", "--month", "2026-10").exit_code == 0
+    assert cli("budget", "history", "--month", "2026-10").exit_code == 0
+    assert cli("budget", "set", "--year", "2026", "--item", "餐饮=18000").exit_code == 0
+    assert cli("budget", "show", "--year", "2026").exit_code == 0
+    assert cli("goal", "add", "教育金", "--target", "200000", "--date", "2030-09-01").exit_code == 0
+    assert cli("goal", "progress", "教育金", "--current", "50000").exit_code == 0
+    assert cli("invest", "product", "000001", "--name", "测试基金").exit_code == 0
+    assert cli("invest", "buy", "000001", "--quantity", "100", "--price", "1.5").exit_code == 0
+    assert cli("invest", "sell", "000001", "--quantity", "10", "--price", "1.8").exit_code == 0
+    assert cli("invest", "dividend", "000001", "--amount", "5").exit_code == 0
+    assert cli("invest", "value", "000001", "--market-value", "180").exit_code == 0
+    assert cli("invest", "portfolio").exit_code == 0
+    assert cli("plan").exit_code == 0
+    assert cli("health", "--month", "2026-10").exit_code == 0
+    assert cli("ask", "2026-10 支出多少").exit_code == 0
+    assert cli("scan").exit_code == 0
+    assert cli("db", "check").exit_code == 0
+    assert cli("db", "mapping").exit_code == 0
+    assert cli("feishu", "status").exit_code == 0
+    created = cli("--json", "backup", "create")
+    assert created.exit_code == 0, created.output
+    backup_path = json.loads(created.output)["path"]
+    assert cli("backup", "list").exit_code == 0
+    assert cli("backup", "verify", backup_path).exit_code == 0
+    assert cli("backup", "prune", "--keep", "5").exit_code == 0
+    assert cli("automation", "list").exit_code == 0
+    assert cli("automation", "run", "weekly_summary").exit_code == 0

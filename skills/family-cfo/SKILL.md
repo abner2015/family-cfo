@@ -14,15 +14,6 @@ metadata:
     tags: [finance, family, accounting, budget, feishu, bitable, sqlite]
     category: finance
     requires_toolsets: [terminal]
-    config:
-      - key: family_cfo.data_dir
-        description: 账单与报告数据目录
-        default: "./data"
-        prompt: Family CFO 数据目录
-      - key: family_cfo.currency
-        description: 家庭本位币
-        default: "CNY"
-        prompt: 本位币（ISO 代码）
 required_environment_variables:
   - name: FAMILY_CFO_FEISHU_APP_ID
     prompt: 飞书自建应用 App ID
@@ -86,11 +77,11 @@ python scripts/fcfo.py --help          # 完整命令列表
 | --- | --- |
 | 导入这个月的微信账单 | `python scripts/fcfo.py import <文件> --platform wechat` 或把文件放入 `data/inbox` 后 `scan` |
 | 分析一下上个月家庭消费 | `analyze --month last` |
-| 这个月教育支出多少 | `ask "这个月教育支出多少"` 或 `analyze --json` |
+| 这个月教育支出多少 | `ask "这个月教育支出多少"` 或 `--json analyze` |
 | 家里财务健康吗 | `health --month current` |
-| 我们家目前有多少净资产？ | `analyze --month current --json`，读取 `balance_sheet.net_worth` |
-| 这个月教育支出多少？ | `analyze --month current --json`，在 `categories` 中筛 `slug=education` |
-| 看看最近三个月消费趋势 | `analyze --json`，读取 `trend` |
+| 我们家目前有多少净资产？ | `--json analyze --month current`，读取 `balance_sheet.net_worth` |
+| 这个月教育支出多少？ | `--json analyze --month current`，在 `categories` 中筛 `slug=education` |
+| 看看最近三个月消费趋势 | `--json analyze`，读取 `trend` |
 | 更新一下房贷余额 | `liability balance 房贷 --amount <金额> --reason <原因>` |
 | 统计今年家庭储蓄率 | `report --year <年份>` 或 `analyze` 汇总；以报告 `totals.savings_rate` 为准 |
 | 进行本月账单结算 | `settle --month current --collect` → `settle --month current --status` → 按需 `--close` |
@@ -131,7 +122,8 @@ python scripts/fcfo.py tx list --month last --review
 - 自定义分类：`category add 宠物 --kind expense --keyword 猫粮 --keyword 宠物医院`，
   之后可由关键词规则自动命中。
 - 退款：对账会自动把入账退款关联到 90 天内同商户/同金额的支出；未关联项需人工确认。
-- 转账/还款：双向金额与日期匹配后自动排除出收支；单边记录保留待确认。
+- 转账/还款：双向金额与日期匹配后自动排除出收支；单边记录保留待确认，会阻塞关账。
+  确认后可用 `tx retype <id> --type transfer --reason "..."` 关闭该审核项；若实际是支出，改为 `--type expense`。
 - **模型不直接写分类**：Agent 只能根据账单内容提出候选分类，必须经用户确认后调用
   `tx fix`；对不确定的交易保持 `pending_review`，不得为了“看起来完整”而猜一个分类。
 
@@ -165,7 +157,7 @@ python scripts/fcfo.py settle --month 2026-10 --reopen --reason "补充退款"
 ### D. 分析、预算、资产负债、投资、目标
 
 ```bash
-python scripts/fcfo.py analyze --month last --json
+python scripts/fcfo.py --json analyze --month last
 python scripts/fcfo.py health --month last
 python scripts/fcfo.py ask "上个月教育支出多少"
 python scripts/fcfo.py budget set --month last --item 餐饮=1500 --item 教育=1000

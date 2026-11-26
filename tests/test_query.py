@@ -131,3 +131,13 @@ def test_ask_cli_json(tmp_path):
     payload = json.loads(result.output)
     assert payload["intent"] in {"expense", "unknown"}
     assert "answer" in payload
+
+
+def test_health_question(session, settings):
+    _seed(session, settings)
+    AccountService(session, settings).set_balance("银行卡", 10000000, as_of=date(2026, 11, 26))
+    answer = answer_question("我家财务健康吗", session, settings)
+    assert answer.intent == "health"
+    assert answer.value is not None
+    assert "健康" in answer.answer
+    assert answer.details

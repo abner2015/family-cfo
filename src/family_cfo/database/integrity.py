@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..core.constants import SettlementStatus, TxnStatus
 from .models import (
+    Household,
     Account,
     Asset,
     AssetValuation,
@@ -95,10 +96,12 @@ def run_integrity_checks(session: Session, household_id: str, *, period: str | N
         )
     ).all()
 
+    household = session.get(Household, household_id)
+    base_currency = household.base_currency if household else "CNY"
     mismatch = [
         t
         for t in txns
-        if t.currency == "CNY" and t.amount_minor != t.amount_base_minor
+        if t.currency == base_currency and t.amount_minor != t.amount_base_minor
     ]
     checks.append(
         CheckResult(

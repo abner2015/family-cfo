@@ -11,6 +11,7 @@ from ..core.config import Settings
 from ..core.constants import TxnStatus
 from ..core.dates import parse_period, previous_period, today_local
 from ..core.money import format_money
+from ..database.backup import backup_database
 from ..database.base import Database
 from ..database.init import get_household
 from ..database.models import Liability, Transaction, TransactionCategory
@@ -66,7 +67,7 @@ def weekly_digest(db: Database, settings: Settings) -> dict:
         expense = sum(
             t.amount_base_minor
             for t in rows
-            if t.stats_included and t.txn_type in {"expense", "fee", "reversal"} and t.direction == "outflow"
+            if t.stats_included and t.txn_type in {"expense", "fee"} and t.direction == "outflow"
         )
         net_expense = max(expense - refund, 0)
         by_category: dict[str, int] = {}
@@ -104,6 +105,13 @@ def weekly_digest(db: Database, settings: Settings) -> dict:
 
 def monthly_collect(db: Database, settings: Settings, period: str | None = None) -> dict:
     period = parse_period(period or previous_period(_current_period(settings)))
+    backup_path = None
+    if settings.auto_backup and settings.db_path.exists():
+        backup_path = str(
+            backup_database(
+                settings.db_path, settings.backups_dir, label=f"pre-collect-{period}"
+            ).path
+        )
     scan = weekly_scan(db, settings)
     with db.session() as session:
         reconciler = Reconciler(session, settings, period=period)
@@ -111,6 +119,7 @@ def monthly_collect(db: Database, settings: Settings, period: str | None = None)
         settlement = SettlementService(session, settings).evaluate(period)
     return {
         "period": period,
+        "backup": backup_path,
         "scan": {k: scan[k] for k in ("files", "imported", "duplicates", "failed")},
         "reconcile": reconcile.as_dict(),
         "settlement": settlement.as_dict(),

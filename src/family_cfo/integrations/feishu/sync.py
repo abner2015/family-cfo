@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -109,9 +110,22 @@ def _yuan(minor: int) -> float:
     return float(from_minor(minor))
 
 
+def _normalize(value):
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, Decimal) and value == value.to_integral_value():
+        return int(value)
+    if isinstance(value, dict):
+        return {k: _normalize(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_normalize(v) for v in value]
+    return value
+
+
 def _hash(fields: dict) -> str:
+    payload = _normalize(fields)
     return hashlib.sha256(
-        json.dumps(fields, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
 
 
@@ -233,7 +247,9 @@ class FeishuSyncService:
                 payload=digest, synced=True,
             )
         else:
-            record = self.client.create_record(table_id, fields)
+            record = self.client.create_record(
+                table_id, fields, client_token=_client_token(entity, entity_id)
+            )
             record_id = record.get("record_id") or record.get("id")
             report.created += 1
             self._mark(
@@ -258,7 +274,7 @@ class FeishuSyncService:
                 "日期": _ms(txn.occurred_at),
                 "方向": "收入" if txn.direction == "inflow" else "支出",
                 "类型": txn.txn_type,
-                "金额": _yuan(txn.amount_base_minor),
+                "金额": _yuan(txn.amount_minor),
                 "币种": txn.currency,
                 "分类": categories.get(txn.category_id, "未分类"),
                 "账户": accounts.get(txn.account_id, ""),
@@ -442,6 +458,10 @@ class FeishuSyncService:
             goal.current_minor = payload.current_minor
             goal.monthly_saving_minor = payload.monthly_saving_minor
             goal.target_date = payload.target_date
+            if goal.status in {"active", "achieved"}:
+                goal.status = (
+                    "achieved" if goal.current_minor >= goal.target_minor else "active"
+                )
             record_audit(
                 session,
                 household_id=household_id,
@@ -484,6 +504,9 @@ class FeishuSyncService:
         service = BudgetService(session, self.settings)
         for period, rows in grouped.items():
             version = max(int(float(r.get("版本", 0) or 0)) for r in rows)
+            # Feishu keeps rows from older budget versions.  Only the latest
+            # version represents the current budget.
+            rows = [r for r in rows if int(float(r.get("版本", 0) or 0)) == version]
             try:
                 payload = BudgetPull(
                     period=parse_period(period),
@@ -607,10 +630,13 @@ class FeishuSyncService:
             return report
         # remote wins: clear the conflict marker and pull that entity
         with self.db.session() as session:
-            sync = self._get_sync(entity, entity_id, "push") or self._get_sync(entity, entity_id, "pull")
+            sync = self._get_sync(entity, entity_id, "push", session=session) or self._get_sync(
+                entity, entity_id, "pull", session=session
+            )
             if sync is not None:
                 sync.status = SyncStatus.PENDING
                 sync.last_synced_at = None
+                sync.payload_hash = None
         return self.pull(entity)
 
     # ---------------------------------------------------------------- helpers
@@ -732,6 +758,18 @@ def _from_ms(value: Any) -> date | None:
         return datetime.fromtimestamp(int(value) / 1000).date()
     except (ValueError, OSError, OverflowError):
         return None
+
+
+def _client_token(entity: str, entity_id: str) -> str:
+    """Deterministic UUIDv4-shaped idempotency key.
+
+    Feishu deduplicates repeated creates with the same client_token, so a
+    timeout/retry cannot create two remote rows for one local entity.
+    """
+    digest = bytearray(hashlib.sha256(f"family-cfo:{entity}:{entity_id}".encode()).digest()[:16])
+    digest[6] = (digest[6] & 0x0F) | 0x40
+    digest[8] = (digest[8] & 0x3F) | 0x80
+    return str(uuid.UUID(bytes=bytes(digest)))
 
 
 def _goal_fields(goal: FinancialGoal) -> dict:

@@ -37,6 +37,9 @@ pytest -q -k "settle or refund"
 | 25 | 自然语言问答 | `test_query.py`（全文件） |
 | 26 | 示例数据隔离 | `test_demo.py`（全文件） |
 | 27 | 撤销交易不计收支 | `test_importers.py::test_reversal_transaction_is_flagged_and_excluded` |
+| 28 | 银行清算行去重 | `test_transactions.py::test_bank_platform_clearing_is_flagged_not_double_counted` |
+| 29 | 人工修正交易类型 | `test_transactions.py::test_retype_transfer_to_expense_is_counted` |
+| 30 | 关账前单边转账审核 | `test_settlement.py::test_mark_missing_requires_reason_and_unblocks` |
 
 ## 测试数据
 

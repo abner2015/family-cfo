@@ -73,10 +73,10 @@ class Settings:
     dedupe_window_days: int = 2
     transfer_window_days: int = 3
     auto_backup: bool = True
-    feishu_app_id: str = ""
-    feishu_app_secret: str = ""
+    feishu_app_id: str = field(default="", repr=False)
+    feishu_app_secret: str = field(default="", repr=False)
     feishu_base_url: str = "https://open.feishu.cn"
-    feishu_app_token: str = ""
+    feishu_app_token: str = field(default="", repr=False)
     feishu_table_prefix: str = "FamilyCFO_"
     feishu_timeout: int = 20
     feishu_max_retries: int = 3
@@ -128,6 +128,11 @@ class Settings:
             self.backups_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
+            try:
+                # Financial data is private to the account running the tool.
+                path.chmod(0o700)
+            except OSError:  # pragma: no cover - exotic filesystems
+                pass
 
     def with_overrides(self, **kwargs: Any) -> "Settings":
         return replace(self, **kwargs)

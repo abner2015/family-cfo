@@ -18,6 +18,7 @@ from ..core.config import Settings
 from ..core.constants import (
     REVIEW_AMBIGUOUS_TRANSFER,
     REVIEW_DUPLICATE,
+    REVIEW_PLATFORM_CLEARING,
     REVIEW_REFUND_UNLINKED,
     Direction,
     MatchStatus,
@@ -35,12 +36,14 @@ log = get_logger("transactions.reconcile")
 
 TRANSFER_HINTS = ("转账", "内部转账", "提现", "充值", "还款", "零钱通", "余额宝", "转入", "转出")
 REFUND_HINTS = ("退款", "退货", "冲正", "撤销", "原路退回")
+CLEARING_HINTS = ("财付通", "微信支付", "支付宝", "网联", "银联", "快捷支付")
 FLOW_TYPES = {TxnType.EXPENSE, TxnType.INCOME, TxnType.REFUND, TxnType.FEE}
 
 
 @dataclass
 class ReconcileResult:
     duplicates_flagged: int = 0
+    clearing_flagged: int = 0
     transfers_matched: int = 0
     refunds_linked: int = 0
     repayments_matched: int = 0
@@ -50,6 +53,7 @@ class ReconcileResult:
     def as_dict(self) -> dict:
         return {
             "duplicates_flagged": self.duplicates_flagged,
+            "clearing_flagged": self.clearing_flagged,
             "transfers_matched": self.transfers_matched,
             "refunds_linked": self.refunds_linked,
             "repayments_matched": self.repayments_matched,
@@ -71,6 +75,7 @@ class Reconciler:
         result = ReconcileResult()
         txns = self._transactions()
         result.duplicates_flagged += self._flag_cross_platform_duplicates(txns)
+        result.clearing_flagged += self._flag_platform_clearing(txns)
         result.transfers_matched = self._match_transfers(txns, result)
         result.refunds_linked += self._link_refunds(txns, result)
         result.review_items = len(
@@ -134,11 +139,25 @@ class Reconciler:
                     if first.duplicate_of_id or second.duplicate_of_id:
                         continue
                     # Flag the later/less trusted record; never delete.
-                    keep, dup = (
-                        (first, second)
-                        if first.source_platform in {"bank", "credit_card"}
-                        else (second, first)
-                    )
+                    # A bank row that merely clears a payment platform should
+                    # lose to the detailed platform transaction, while a real
+                    # bank/credit-card statement wins over a mirror.
+                    def is_clearing(txn: Transaction) -> bool:
+                        text = f"{txn.counterparty or ''} {txn.description or ''}"
+                        return txn.source_platform in {"bank", "credit_card"} and any(
+                            hint in text for hint in CLEARING_HINTS
+                        )
+
+                    if is_clearing(first) and not is_clearing(second):
+                        keep, dup = second, first
+                    elif is_clearing(second) and not is_clearing(first):
+                        keep, dup = first, second
+                    else:
+                        keep, dup = (
+                            (first, second)
+                            if first.source_platform in {"bank", "credit_card"}
+                            else (second, first)
+                        )
                     dup.duplicate_of_id = keep.id
                     dup.stats_included = False
                     dup.status = TxnStatus.PENDING_REVIEW
@@ -163,9 +182,94 @@ class Reconciler:
         tokens_b = {t for t in re.split(r"[\s\-/|]+", nb) if len(t) >= 3}
         return bool(tokens_a & tokens_b)
 
+    # --------------------------------------------------------- platform clearing
+    def _flag_platform_clearing(self, txns: list[Transaction]) -> int:
+        """Bank rows that merely settle a WeChat/Alipay purchase.
+
+        If the corresponding platform transaction is present, keeping both
+        would double count.  The bank row is flagged for review (never deleted)
+        so the user can confirm it as the same payment.
+        """
+        window = timedelta(days=max(self.settings.dedupe_window_days, 1))
+        platform_pool = list(txns)
+        if self.period:
+            from ..core.dates import month_bounds
+
+            start, end = month_bounds(self.period)
+            platform_pool.extend(
+                self.session.scalars(
+                    select(Transaction).where(
+                        Transaction.household_id == self.household_id,
+                        Transaction.is_deleted.is_(False),
+                        Transaction.status != TxnStatus.VOID,
+                        Transaction.source_platform.in_(["wechat", "alipay"]),
+                        Transaction.occurred_at
+                        >= datetime.combine(start, datetime.min.time()) - window,
+                        Transaction.occurred_at
+                        <= datetime.combine(end, datetime.max.time().replace(microsecond=0))
+                        + window,
+                    )
+                )
+            )
+        platforms = [
+            t
+            for t in {x.id: x for x in platform_pool}.values()
+            if t.source_platform in {"wechat", "alipay"}
+            and t.txn_type in {TxnType.EXPENSE, TxnType.REFUND}
+            and not t.duplicate_of_id
+        ]
+        flagged = 0
+        for bank in txns:
+            if bank.source_platform not in {"bank", "credit_card"} or bank.duplicate_of_id:
+                continue
+            if bank.txn_type not in {TxnType.EXPENSE, TxnType.REFUND}:
+                continue
+            text = f"{bank.counterparty or ''} {bank.description or ''}"
+            if not any(hint in text for hint in CLEARING_HINTS):
+                continue
+            for platform in platforms:
+                if platform.direction != bank.direction:
+                    continue
+                if platform.amount_minor != bank.amount_minor or platform.currency != bank.currency:
+                    continue
+                if abs(platform.occurred_at - bank.occurred_at) > window:
+                    continue
+                bank.duplicate_of_id = platform.id
+                bank.stats_included = False
+                bank.status = TxnStatus.PENDING_REVIEW
+                bank.review_reason = REVIEW_PLATFORM_CLEARING
+                flagged += 1
+                break
+        if flagged:
+            self.session.flush()
+        return flagged
+
     # ----------------------------------------------------------------- transfers
     def _match_transfers(self, txns: list[Transaction], result: ReconcileResult) -> int:
         window = timedelta(days=max(self.settings.transfer_window_days, 1))
+        if self.period:
+            # A transfer can straddle midnight / a month boundary.  Include a
+            # window around the period and deduplicate by id.
+            from ..core.dates import month_bounds
+
+            start, end = month_bounds(self.period)
+            extra = list(
+                self.session.scalars(
+                    select(Transaction).where(
+                        Transaction.household_id == self.household_id,
+                        Transaction.is_deleted.is_(False),
+                        Transaction.status != TxnStatus.VOID,
+                        Transaction.occurred_at
+                        >= datetime.combine(start, datetime.min.time()) - window,
+                        Transaction.occurred_at
+                        <= datetime.combine(end, datetime.max.time().replace(microsecond=0))
+                        + window,
+                    )
+                )
+            )
+            merged = {t.id: t for t in extra}
+            merged.update({t.id: t for t in txns})
+            txns = list(merged.values())
         outflows = [t for t in txns if t.direction == Direction.OUTFLOW and t.txn_type in FLOW_TYPES | {TxnType.TRANSFER, TxnType.CREDIT_CARD_REPAYMENT, TxnType.TOPUP, TxnType.WITHDRAWAL}]
         inflows = [t for t in txns if t.direction == Direction.INFLOW and t.txn_type in FLOW_TYPES | {TxnType.TRANSFER, TxnType.TOPUP, TxnType.WITHDRAWAL}]
         used_out: set[str] = set()
@@ -183,7 +287,10 @@ class Reconciler:
                     continue
                 if abs(inflow.occurred_at - out.occurred_at) > window:
                     continue
-                if not self._is_transfer_like(out) and not self._is_transfer_like(inflow):
+                # Both sides must look like an internal movement.  One transfer
+                # hint on a salary/rent pair is not enough and would silently
+                # remove real income and expense.
+                if not (self._is_transfer_like(out) and self._is_transfer_like(inflow)):
                     continue
                 group = new_id("txn") if not out.transfer_group_id else out.transfer_group_id
                 out.transfer_group_id = group
@@ -196,8 +303,11 @@ class Reconciler:
                 inflow.stats_included = False
                 out.status = TxnStatus.CONFIRMED
                 inflow.status = TxnStatus.CONFIRMED
-                out.review_reason = None if out.review_reason == REVIEW_AMBIGUOUS_TRANSFER else out.review_reason
-                inflow.review_reason = None if inflow.review_reason == REVIEW_AMBIGUOUS_TRANSFER else inflow.review_reason
+                internal_reasons = {REVIEW_AMBIGUOUS_TRANSFER, "internal_flow_candidate"}
+                if out.review_reason in internal_reasons:
+                    out.review_reason = None
+                if inflow.review_reason in internal_reasons:
+                    inflow.review_reason = None
                 self.session.add(
                     TransferMatch(
                         id=new_id("transfer"),
@@ -258,13 +368,24 @@ class Reconciler:
                 or any(hint in f"{t.counterparty or ''} {t.description or ''}" for hint in REFUND_HINTS)
             )
         ]
-        expenses = [
-            t
-            for t in txns
-            if t.direction == Direction.OUTFLOW
-            and t.txn_type in {TxnType.EXPENSE, TxnType.FEE}
-            and t.status != TxnStatus.VOID
-        ]
+        if not candidates:
+            return 0
+        earliest = min(t.occurred_at for t in candidates) - timedelta(days=90)
+        latest = max(t.occurred_at for t in candidates)
+        expenses = list(
+            self.session.scalars(
+                select(Transaction).where(
+                    Transaction.household_id == self.household_id,
+                    Transaction.is_deleted.is_(False),
+                    Transaction.status != TxnStatus.VOID,
+                    Transaction.stats_included.is_(True),
+                    Transaction.direction == Direction.OUTFLOW,
+                    Transaction.txn_type.in_([TxnType.EXPENSE, TxnType.FEE]),
+                    Transaction.occurred_at >= earliest,
+                    Transaction.occurred_at <= latest,
+                )
+            )
+        )
         for refund in candidates:
             best: tuple[float, Transaction] | None = None
             for original in expenses:
@@ -282,8 +403,13 @@ class Reconciler:
                     h in f"{refund.counterparty or ''} {refund.description or ''}" for h in REFUND_HINTS
                 ) else 0.0
                 days = (refund.occurred_at - original.occurred_at).days
-                score = amount_score * 0.5 + hint_score * 0.25 + (0.25 if similarity else 0.0) - days * 0.001
-                if similarity or hint_score:
+                if similarity:
+                    score = amount_score * 0.5 + 0.3 + hint_score * 0.2 - days * 0.001
+                else:
+                    # Without a merchant match this is only a weak candidate;
+                    # keep it below the auto-confirm threshold.
+                    score = amount_score * 0.2 + hint_score * 0.2 - days * 0.001
+                if hint_score:
                     if best is None or score > best[0]:
                         best = (score, original)
             if best is None:
@@ -295,6 +421,12 @@ class Reconciler:
             refund.refund_of_id = original.id
             if original.category_id and not refund.category_id:
                 refund.category_id = original.category_id
+            if (
+                original.status == TxnStatus.PENDING_REVIEW
+                and original.review_reason == REVIEW_REFUND_UNLINKED
+            ):
+                original.status = TxnStatus.CONFIRMED
+                original.review_reason = None
             refund.stats_included = True
             refund.status = TxnStatus.CONFIRMED if score >= 0.7 else TxnStatus.PENDING_REVIEW
             refund.review_reason = None if score >= 0.7 else REVIEW_REFUND_UNLINKED

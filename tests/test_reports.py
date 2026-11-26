@@ -26,6 +26,14 @@ def test_monthly_report_contains_data_quality_and_formulas(db, settings, import_
     assert "口径与声明" in markdown
     assert "¥" in markdown
     assert report["metrics"]["summary"]["income_minor"] == 1231250
+    assert all(
+        c["txn_type"] != "refund"
+        for c in report["metrics"]["categories"]
+        if c["direction"] == "inflow"
+    )
+    shopping = next(c for c in report["metrics"]["categories"] if c["slug"] == "shopping")
+    # 399 WeChat purchase refunded, plus 320 bank purchase => net 320
+    assert shopping["amount_minor"] == 32000
     assert report["settlement"]["status"] in {"READY_TO_CLOSE", "REVIEW_REQUIRED"}
     assert any("退款" in line for line in markdown.splitlines())
 

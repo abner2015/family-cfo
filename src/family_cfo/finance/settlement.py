@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from ..core.config import Settings
 from ..core.constants import (
+    REVIEW_AMBIGUOUS_TRANSFER,
     REVIEW_DUPLICATE,
     REVIEW_REFUND_UNLINKED,
     SettlementStatus,
@@ -272,6 +273,23 @@ class SettlementService:
                 f"疑似重复 {len(duplicate_suspects)} 笔",
             )
         )
+        internal_reasons = {REVIEW_AMBIGUOUS_TRANSFER, "internal_flow_candidate"}
+        unreviewed_transfers = [
+            t
+            for t in txns
+            if t.review_reason in internal_reasons
+            and not t.transfer_group_id
+            and t.status != TxnStatus.VOID
+        ]
+        items.append(
+            ChecklistItem(
+                "transfers_reviewed",
+                "单边转账/还款已人工确认",
+                not unreviewed_transfers,
+                True,
+                f"待确认 {len(unreviewed_transfers)} 笔",
+            )
+        )
         items.append(
             ChecklistItem(
                 "refund_links",
@@ -331,7 +349,7 @@ class SettlementService:
                 Transaction.direction == "inflow",
             )
         ).scalar_one()
-        sql_net_expense = max(int(sql_expense) - int(sql_refund), 0)
+        sql_net_expense = int(sql_expense) - int(sql_refund)
         consistent = int(sql_income) == summary.income_minor and sql_net_expense == summary.expense_minor
         items.append(
             ChecklistItem(

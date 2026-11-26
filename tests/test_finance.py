@@ -352,3 +352,73 @@ def test_annual_budget_execution(session, settings):
     second = service.set_budget(year=2026, items=[{"category": "food", "amount": "15000"}])
     assert second.version == 2
     assert [b.status for b in service.history_year(2026)] == ["superseded", "active"]
+
+
+def test_trade_after_valuation_invalidates_market_value(session, settings):
+    service = InvestmentService(session, settings)
+    service.add_product(symbol="000002", name="测试基金2", product_type="fund")
+    service.record(
+        product_ref="000002", txn_type="buy", trade_date=date(2026, 10, 1),
+        quantity="100", price="1.5",
+    )
+    service.revalue("000002", market_value="170", valued_on=date(2026, 10, 5))
+    assert service.portfolio().positions[0].market_value_minor == 17000
+    service.record(
+        product_ref="000002", txn_type="buy", trade_date=date(2026, 10, 10),
+        quantity="10", price="1.6",
+    )
+    position = service.portfolio().positions[0]
+    assert position.market_value_minor is None
+    assert position.estimated is True
+    assert position.unrealized_minor is None
+
+
+def test_refund_can_make_monthly_expense_negative(session, settings):
+    food = session.scalar(select(TransactionCategory).where(TransactionCategory.slug == "food"))
+    _txn(
+        session, settings, occurred_at="2026-10-05 12:00:00",
+        amount_minor=100000, category_id=food.id, counterparty="餐厅",
+    )
+    _txn(
+        session, settings, occurred_at="2026-11-05 12:00:00", direction="inflow",
+        txn_type="refund", amount_minor=100000, category_id=food.id, counterparty="餐厅",
+    )
+    household_id = TransactionService(session, settings).household_id
+    november = period_summary(session, household_id, "2026-11")
+    assert november.expense_minor == -100000
+    assert november.net_minor == 100000  # income 0 - (-100000)
+    rows = net_flow_by_category(session, household_id, "2026-11")
+    food_row = next(r for r in rows if r["slug"] == "food")
+    assert food_row["direction"] == "outflow"
+    assert food_row["amount_minor"] == -100000
+    # Refunds never appear as income.
+    assert not any(r["direction"] == "inflow" and r["slug"] == "food" for r in rows)
+
+
+def test_budget_is_net_of_refunds(session, settings):
+    food = session.scalar(select(TransactionCategory).where(TransactionCategory.slug == "food"))
+    service = BudgetService(session, settings)
+    service.set_budget(period="2026-10", items=[{"category": "food", "amount": "1000"}])
+    _txn(session, settings, amount_minor=120000, category_id=food.id)
+    _txn(
+        session, settings, occurred_at="2026-10-20 12:00:00", direction="inflow",
+        txn_type="refund", amount_minor=20000, category_id=food.id,
+    )
+    report = service.execution("2026-10")
+    assert report.total_actual_minor == 100000
+    assert report.lines[0].actual_minor == 100000
+    assert report.execution_rate == Decimal("1.0")
+
+
+def test_foreign_investment_is_excluded_from_base_totals(session, settings):
+    service = InvestmentService(session, settings)
+    service.add_product(symbol="CNY1", name="人民币基金", product_type="fund", currency="CNY")
+    service.record(product_ref="CNY1", txn_type="buy", trade_date=date(2026, 10, 1),
+                   quantity="100", price="1")
+    service.add_product(symbol="USD1", name="美元基金", product_type="fund", currency="USD")
+    service.record(product_ref="USD1", txn_type="buy", trade_date=date(2026, 10, 1),
+                   quantity="100", price="1")
+    portfolio = service.portfolio()
+    assert portfolio.cost_minor == 10000  # CNY only
+    assert "USD" in portfolio.excluded_currencies
+    assert portfolio.as_dict()["excluded_currencies"] == ["USD"]
