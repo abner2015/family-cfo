@@ -35,7 +35,7 @@ log = get_logger("transactions.reconcile")
 
 TRANSFER_HINTS = ("转账", "内部转账", "提现", "充值", "还款", "零钱通", "余额宝", "转入", "转出")
 REFUND_HINTS = ("退款", "退货", "冲正", "撤销", "原路退回")
-FLOW_TYPES = {TxnType.EXPENSE, TxnType.INCOME, TxnType.REFUND, TxnType.REVERSAL, TxnType.FEE}
+FLOW_TYPES = {TxnType.EXPENSE, TxnType.INCOME, TxnType.REFUND, TxnType.FEE}
 
 
 @dataclass

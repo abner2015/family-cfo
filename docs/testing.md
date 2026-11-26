@@ -32,6 +32,11 @@ pytest -q -k "settle or refund"
 | 20 | 同步失败重试 | `test_feishu.py::test_retry_on_rate_limit` |
 | 21 | 敏感信息脱敏 | `test_cli_skill.py::test_redaction_masks_secrets_and_accounts` |
 | 22 | Skill 安装与路径 | `test_cli_skill.py::test_skill_script_runs_from_copied_directory` |
+| 23 | 年度预算执行 | `test_finance.py::test_annual_budget_execution` |
+| 24 | 财务健康诊断 | `test_health.py`（全文件） |
+| 25 | 自然语言问答 | `test_query.py`（全文件） |
+| 26 | 示例数据隔离 | `test_demo.py`（全文件） |
+| 27 | 撤销交易不计收支 | `test_importers.py::test_reversal_transaction_is_flagged_and_excluded` |
 
 ## 测试数据
 

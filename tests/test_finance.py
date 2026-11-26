@@ -330,3 +330,25 @@ def test_asset_ownership_share_reduces_household_value(session, settings):
     assert summary["total_minor"] == 50000000
     assert summary["assets"][0]["owned_value_minor"] == 50000000
     assert summary["assets"][0]["ownership_share"] == "0.5"
+
+
+def test_annual_budget_execution(session, settings):
+    food = session.scalar(select(TransactionCategory).where(TransactionCategory.slug == "food"))
+    service = BudgetService(session, settings)
+    budget = service.set_budget(
+        year=2026, items=[{"category": "food", "amount": "12000"}]
+    )
+    assert budget.period_type == "annual"
+    _txn(session, settings, occurred_at="2026-01-10 12:00:00", amount_minor=100000, category_id=food.id)
+    _txn(session, settings, occurred_at="2026-02-10 12:00:00", amount_minor=50000, category_id=food.id)
+    report = service.execution_year(2026)
+    assert report is not None
+    assert report.period == "2026"
+    assert report.total_budget_minor == 1200000
+    assert report.total_actual_minor == 150000
+    assert report.execution_rate.quantize(Decimal("0.0001")) == Decimal("0.1250")
+    assert [b.version for b in service.history_year(2026)] == [1]
+
+    second = service.set_budget(year=2026, items=[{"category": "food", "amount": "15000"}])
+    assert second.version == 2
+    assert [b.status for b in service.history_year(2026)] == ["superseded", "active"]

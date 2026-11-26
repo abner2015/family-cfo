@@ -51,7 +51,8 @@ Python 以 `Decimal` / 整数分计算，**不得由模型心算、估算或补�
 - 用户询问家庭收支、储蓄率、净资产、资产负债率、应急资金、预算执行、投资收益；
 - 用户要记录一笔消费（自然语言记账）、修正分类、处理重复/退款/转账；
 - 用户要更新房贷余额、资产估值、预算、投资持仓或家庭目标；
-- 用户要做月度结算、生成月报/年报、同步飞书、备份/恢复账本。
+- 用户要做月度结算、生成月报/年报、同步飞书、备份/恢复账本；
+- 用户询问“我家财务健康吗”“这个月教育支出多少”等需要口径一致的问题。
 
 不要用于：证券交易执行、转账支付、信贷申请、税务申报等对外金融操作。本 Skill 只读账本，
 不具备任何付款或交易能力。
@@ -85,6 +86,8 @@ python scripts/fcfo.py --help          # 完整命令列表
 | --- | --- |
 | 导入这个月的微信账单 | `python scripts/fcfo.py import <文件> --platform wechat` 或把文件放入 `data/inbox` 后 `scan` |
 | 分析一下上个月家庭消费 | `analyze --month last` |
+| 这个月教育支出多少 | `ask "这个月教育支出多少"` 或 `analyze --json` |
+| 家里财务健康吗 | `health --month current` |
 | 我们家目前有多少净资产？ | `analyze --month current --json`，读取 `balance_sheet.net_worth` |
 | 这个月教育支出多少？ | `analyze --month current --json`，在 `categories` 中筛 `slug=education` |
 | 看看最近三个月消费趋势 | `analyze --json`，读取 `trend` |
@@ -163,7 +166,11 @@ python scripts/fcfo.py settle --month 2026-10 --reopen --reason "补充退款"
 
 ```bash
 python scripts/fcfo.py analyze --month last --json
+python scripts/fcfo.py health --month last
+python scripts/fcfo.py ask "上个月教育支出多少"
 python scripts/fcfo.py budget set --month last --item 餐饮=1500 --item 教育=1000
+python scripts/fcfo.py budget set --year 2026 --item 餐饮=18000
+python scripts/fcfo.py budget show --year 2026
 python scripts/fcfo.py budget show --month last
 python scripts/fcfo.py asset list
 python scripts/fcfo.py asset value 自住房 --value 2100000 --valued-on 2026-10-31

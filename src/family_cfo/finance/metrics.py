@@ -216,7 +216,7 @@ def period_summary(
             summary.refund_minor += amount
             summary.transaction_count += 1
             continue
-        if txn.txn_type in {TxnType.EXPENSE, TxnType.FEE, TxnType.REVERSAL} and txn.direction == "outflow":
+        if txn.txn_type in {TxnType.EXPENSE, TxnType.FEE} and txn.direction == "outflow":
             summary.expense_minor += amount
             summary.transaction_count += 1
             category = categories.get(txn.category_id) if txn.category_id else None

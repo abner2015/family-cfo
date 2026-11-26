@@ -48,6 +48,14 @@ family-cfo init --household "我家" --member "我"
 
 重复执行是幂等的；`--reset --force` 会删除现有数据库（慎用）。
 
+想先体验完整流程，可在**空账本**写入合成示例数据（全部以“演示”开头）：
+
+```bash
+family-cfo demo --yes
+family-cfo health
+family-cfo ask "这个月教育支出多少"
+```
+
 ## 3. 首次导入
 
 ```bash

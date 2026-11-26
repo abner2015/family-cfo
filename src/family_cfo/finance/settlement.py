@@ -315,7 +315,7 @@ class SettlementService:
                 Transaction.is_deleted.is_(False),
                 Transaction.status != TxnStatus.VOID,
                 Transaction.stats_included.is_(True),
-                Transaction.txn_type.in_([TxnType.EXPENSE, TxnType.FEE, TxnType.REVERSAL]),
+                Transaction.txn_type.in_([TxnType.EXPENSE, TxnType.FEE]),
                 Transaction.direction == "outflow",
             )
         ).scalar_one()

@@ -23,6 +23,8 @@
 - **投资**：产品、买卖、分红、手续费、持仓、已实现/未实现收益；无行情时不虚构市值。
 - **规划**：应急资金、教育、养老、住房、大额消费；输出区分实际/估算/假设。
 - **分析**：15+ 指标，全部带公式与数据来源。
+- **健康诊断**：应急金、储蓄率、负债率、债务负担、流动性、持仓集中度规则评分。
+- **自然语言问答**：`ask "这个月教育支出多少"` 确定性解析，不依赖模型心算。
 - **结算**：`COLLECTING → … → CLOSED` 状态机，关账门槛、覆盖审计、重开留痕。
 - **飞书**：建表、增量推送、失败重试、限流、冲突检测、目标/预算校验回写。
 - **报告**：Markdown / Excel 月报与年报。
@@ -76,6 +78,14 @@ family-cfo settle --month 2026-10 --close
 family-cfo report --month 2026-10 --format md,xlsx
 ```
 
+可选：先用合成数据体验完整流程（仅空账本，数据均以“演示”开头）：
+
+```bash
+family-cfo demo --yes
+family-cfo health
+family-cfo ask "这个月教育支出多少"
+```
+
 也可以把账单放进 `data/inbox/`，执行 `family-cfo scan`：
 成功文件移到 `processed/`，失败文件与错误报告在 `failed/`，原始文件只读归档到 `archive/`。
 
@@ -90,6 +100,8 @@ family-cfo report --month 2026-10 --format md,xlsx
 | `reconcile` | 去重、转账、退款、还款识别 |
 | `settle` | 归集/状态/关账/重开/标记缺失渠道 |
 | `analyze` | 月度指标、分类、趋势；`--week` 周报 |
+| `health` | 财务健康诊断（规则评分，缺数据明确标注） |
+| `ask "..."` | 自然语言财务问答（确定性解析） |
 | `report` | 月报/年报（md/xlsx） |
 | `record "午餐 35 元"` | 自然语言记账（默认需确认） |
 | `tx list/fix/delete/restore/resolve` | 交易查询、改分类、软删除、重复处理 |
@@ -104,6 +116,7 @@ family-cfo report --month 2026-10 --format md,xlsx
 | `backup create/list/verify/restore/prune` | 备份恢复 |
 | `automation list/install/run` | 定时任务（默认不启用） |
 | `db check/config/mapping` | 完整性与配置 |
+| `demo --yes` | 写入合成示例数据（仅空账本） |
 
 全局选项：`--root`、`--db`、`--json`、`--verbose`。`--json` 需放在子命令之前，
 例如 `family-cfo --json analyze --month 2026-10`。

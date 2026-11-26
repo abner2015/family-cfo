@@ -73,6 +73,17 @@ InvestmentService(session, settings).record(...) / .revalue(...) / .portfolio()
 PlanningService(session, settings).add_goal(...) / .plan(annual_return=...)
 ```
 
+## 健康诊断与问答
+
+```python
+diagnose(session, settings, period="YYYY-MM", as_of=None) -> HealthReport
+answer_question("这个月教育支出多少", session, settings) -> QueryAnswer
+seed_demo(db, settings) -> dict     # 仅空账本，全部标记为演示
+```
+
+两者都是确定性实现：`diagnose` 用固定阈值评分，`answer_question` 只解析常见意图；
+无法回答时返回 `data_status="unavailable"` 与建议问题，不生成猜测数字。
+
 ## 飞书
 
 ```python

@@ -36,12 +36,15 @@ from .database.backup import (
 from .database.base import Database
 from .database.init import initialize
 from .database.integrity import run_integrity_checks
+from .demo import seed_demo
 from .database.models import (
     FamilyMember,
     Transaction,
     TransactionCategory,
 )
 from .finance.metrics import build_metrics, monthly_trend
+from .finance.health import diagnose
+from .finance.query import answer_question
 from .finance.settlement import SettlementService
 from .importers.mapping import load_profiles
 from .importers.service import ImportService
@@ -244,6 +247,23 @@ def init(
                 "\n下一步：把账单放入 data/inbox 后运行 `family-cfo scan`；"
                 "或在飞书中配置多维表格后运行 `family-cfo feishu ensure-tables`。"
             )
+
+
+@app.command()
+def demo(
+    ctx: typer.Context,
+    yes: bool = typer.Option(False, "--yes", help="确认写入合成示例数据"),
+) -> None:
+    """写入合成示例数据（仅空账本，必须显式确认）。"""
+    state: CliState = ctx.obj
+    with friendly_errors():
+        settings = _settings(state)
+        if not yes:
+            raise ValidationError(
+                "demo 会写入合成示例交易/资产/负债，必须使用 --yes 明确确认。"
+            )
+        payload = seed_demo(_db(state), settings)
+        _emit(state, payload, title="示例数据已写入")
 
 
 @app.command()
@@ -463,6 +483,44 @@ def analyze(
 
 
 @app.command()
+def health(
+    ctx: typer.Context,
+    month: Optional[str] = typer.Option(None, "--month", help="YYYY-MM，默认本月"),
+) -> None:
+    """家庭财务健康诊断（规则评分，数据不足时明确标注）。"""
+    state: CliState = ctx.obj
+    with friendly_errors():
+        settings = _settings(state)
+        db = _db(state)
+        period = _period_or_current(month, settings)
+        with db.session() as session:
+            report = diagnose(session, settings, period=period)
+        payload = report.as_dict()
+        if state.as_json:
+            _emit(state, payload)
+            return
+        score = payload["score"]
+        typer.secho(
+            f"{period} 家庭财务健康：{payload['grade']}"
+            + (f"（{score}/100）" if score is not None else ""),
+            bold=True,
+        )
+        typer.echo("")
+        for finding in payload["findings"]:
+            typer.echo(
+                f"- {finding['label']}: {finding['value'] or '—'} "
+                f"[{finding['status_label']}] 阈值 {finding['threshold']}"
+            )
+            if finding["suggestion"]:
+                typer.echo(f"    建议：{finding['suggestion']}")
+        if payload["unavailable"]:
+            typer.echo("")
+            typer.echo("数据不足：" + "、".join(payload["unavailable"]))
+        typer.echo("")
+        typer.echo(payload["disclaimer"])
+
+
+@app.command()
 def report(
     ctx: typer.Context,
     month: Optional[str] = typer.Option(None, "--month", help="YYYY-MM 月报"),
@@ -504,6 +562,31 @@ def report(
 # ---------------------------------------------------------------------------
 # record / tx
 # ---------------------------------------------------------------------------
+@app.command()
+def ask(
+    ctx: typer.Context,
+    question: str = typer.Argument(..., help="自然语言财务问题，如：这个月教育支出多少"),
+) -> None:
+    """用自然语言查询账本（确定性解析，不做心算）。"""
+    state: CliState = ctx.obj
+    with friendly_errors():
+        settings = _settings(state)
+        db = _db(state)
+        with db.session() as session:
+            payload = answer_question(question, session, settings).as_dict()
+        if state.as_json:
+            _emit(state, payload)
+            return
+        typer.secho(payload["answer"], bold=True)
+        if payload["data_status"] == "unavailable":
+            typer.secho("（数据不足，未给出估算值）", fg=typer.colors.YELLOW)
+        if payload["suggestions"] and payload["intent"] == "unknown":
+            typer.echo("")
+            typer.echo("可以这样问：")
+            for item in payload["suggestions"]:
+                typer.echo(f"  - {item}")
+
+
 @app.command()
 def record(
     ctx: typer.Context,
@@ -998,34 +1081,52 @@ def budget_set(
 
 
 @budget_app.command("show")
-def budget_show(ctx: typer.Context, month: Optional[str] = typer.Option(None, "--month")) -> None:
-    """查看预算执行情况。"""
+def budget_show(
+    ctx: typer.Context,
+    month: Optional[str] = typer.Option(None, "--month"),
+    year: Optional[int] = typer.Option(None, "--year", help="查看年度预算执行"),
+) -> None:
+    """查看预算执行情况（月度或年度）。"""
     state: CliState = ctx.obj
     with friendly_errors():
         settings = _settings(state)
         db = _db(state)
-        period = _period_or_current(month, settings)
         with db.session() as session:
-            result = BudgetService(session, settings).execution(period)
-            payload = result.as_dict() if result else {"period": period, "message": "本月未设置预算"}
+            service = BudgetService(session, settings)
+            if year is not None:
+                result = service.execution_year(year)
+                period = str(year)
+            else:
+                period = _period_or_current(month, settings)
+                result = service.execution(period)
+            payload = result.as_dict() if result else {"period": period, "message": "该期间未设置预算"}
         _emit(state, payload, title=f"{period} 预算")
 
 
 @budget_app.command("history")
-def budget_history(ctx: typer.Context, month: Optional[str] = typer.Option(None, "--month")) -> None:
+def budget_history(
+    ctx: typer.Context,
+    month: Optional[str] = typer.Option(None, "--month"),
+    year: Optional[int] = typer.Option(None, "--year"),
+) -> None:
     """查看预算版本历史。"""
     state: CliState = ctx.obj
     with friendly_errors():
         settings = _settings(state)
         db = _db(state)
-        period = _period_or_current(month, settings)
         with db.session() as session:
-            rows = BudgetService(session, settings).history(period)
+            service = BudgetService(session, settings)
+            if year is not None:
+                rows = service.history_year(year)
+                label = str(year)
+            else:
+                label = _period_or_current(month, settings)
+                rows = service.history(label)
             payload = [
                 {"id": b.id, "version": b.version, "status": b.status, "total": format_money(b.total_amount_minor)}
                 for b in rows
             ]
-        _emit(state, payload, title=f"{period} 预算历史")
+        _emit(state, payload, title=f"{label} 预算历史")
 
 
 # ---------------------------------------------------------------------------

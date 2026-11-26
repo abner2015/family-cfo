@@ -270,15 +270,33 @@ class BudgetService:
             )
         )
 
-    def execution(self, period: str) -> BudgetReport | list[dict]:
+    def history_year(self, year: int) -> list[Budget]:
+        return list(
+            self.session.scalars(
+                select(Budget)
+                .where(
+                    Budget.household_id == self.household_id,
+                    Budget.period_type == BudgetPeriod.ANNUAL,
+                    Budget.period_start == date(year, 1, 1),
+                )
+                .order_by(Budget.version.asc())
+            )
+        )
+
+    def execution(self, period: str) -> BudgetReport | None:
         budget = self.active(period)
         if budget is None:
-            return []
-        report = self._execution_for(budget, period)
-        return report
-
-    def _execution_for(self, budget: Budget, period: str) -> BudgetReport:
+            return None
         start, end = month_bounds(period)
+        return self._execution_range(budget, start, end, period)
+
+    def execution_year(self, year: int) -> BudgetReport | None:
+        budget = self.active_year(year)
+        if budget is None:
+            return None
+        return self._execution_range(budget, date(year, 1, 1), date(year, 12, 31), str(year))
+
+    def _execution_range(self, budget: Budget, start: date, end: date, label: str) -> BudgetReport:
         txns = list(
             self.session.scalars(
                 select(Transaction).where(
@@ -289,7 +307,7 @@ class BudgetService:
                     Transaction.is_deleted.is_(False),
                     Transaction.status != TxnStatus.VOID,
                     Transaction.stats_included.is_(True),
-                    Transaction.txn_type.in_([TxnType.EXPENSE, TxnType.FEE, TxnType.REVERSAL]),
+                    Transaction.txn_type.in_([TxnType.EXPENSE, TxnType.FEE]),
                     Transaction.direction == "outflow",
                 )
             )
@@ -342,7 +360,7 @@ class BudgetService:
         budgeted_actual = sum(actual_by_category.get(c, 0) for c in budgeted_categories)
         report = BudgetReport(
             budget_id=budget.id,
-            period=period,
+            period=label,
             version=budget.version,
             name=budget.name,
             total_budget_minor=budget.total_amount_minor,

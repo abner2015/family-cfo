@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 
 from ..core.constants import (
+    REVIEW_REVERSAL_UNLINKED,
     SOURCE_WECHAT,
     Direction,
     TxnStatus,
@@ -190,6 +191,8 @@ class WeChatAdapter:
             review = review or "internal_flow_candidate"
         if status_text and any(k in status_text for k in ("失败", "已关闭", "已撤销")):
             txn_type = TxnType.REVERSAL
+            status = TxnStatus.PENDING_REVIEW
+            review = REVIEW_REVERSAL_UNLINKED
         return direction, txn_type, status, review
 
 

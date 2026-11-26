@@ -121,6 +121,12 @@ class TransactionService:
             raise ValidationError(f"非法方向: {direction}")
         if txn_type not in {t.value for t in TxnType}:
             raise ValidationError(f"非法交易类型: {txn_type}")
+        stats_included = True
+        if txn_type == TxnType.REVERSAL:
+            stats_included = False
+            if status == TxnStatus.CONFIRMED:
+                status = TxnStatus.PENDING_REVIEW
+            review_reason = review_reason or "reversal_unlinked"
         txn_currency = (currency or self.settings.currency).upper()
         if member_id is None:
             member_id = self._default_member_id()
@@ -139,7 +145,6 @@ class TransactionService:
 
         amount_base = amount_minor
         fx_decimal: Decimal | None = None
-        stats_included = True
         if txn_currency != self.settings.currency:
             if fx_rate is None:
                 status = TxnStatus.PENDING_REVIEW

@@ -233,3 +233,30 @@ def test_scan_custom_directory(importer: ImportService, settings, tmp_path):
     reports = importer.scan_inbox(directory=scan_dir)
     assert len(reports) == 1
     assert reports[0].imported == 11
+
+
+def test_reversal_transaction_is_flagged_and_excluded(importer: ImportService, settings, session):
+    from family_cfo.finance.metrics import period_summary
+
+    content = "\n".join(
+        [
+            "微信支付账单明细",
+            "交易时间,交易类型,交易对方,商品,收/支,金额(元),支付方式,当前状态,交易单号,商户单号,备注",
+            "2026-10-05 10:00:00,商户消费,撤销商户,测试,支出,¥100.00,零钱,已撤销,WXREV1,,",
+            "2026-10-06 10:00:00,商户消费,正常商户,测试,支出,¥20.00,零钱,支付成功,WXOK1,,",
+        ]
+    )
+    path = settings.data_dir / "reversal.csv"
+    path.write_text(content, encoding="utf-8")
+    report = importer.import_file(path)
+    assert report.imported == 2
+    txns = {t.external_id: t for t in session.scalars(select(Transaction))}
+    reversal = txns["WXREV1"]
+    assert reversal.txn_type == "reversal"
+    assert reversal.status == "pending_review"
+    assert reversal.stats_included is False
+    assert reversal.review_reason == "reversal_unlinked"
+    summary = period_summary(
+        session, session.scalar(select(Transaction)).household_id, "2026-10"
+    )
+    assert summary.expense_minor == 2000
