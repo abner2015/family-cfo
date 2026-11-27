@@ -224,7 +224,7 @@ class FeishuSyncService:
             view_id = (view or {}).get("view_id")
             if view_id:
                 self.client.set_view_filter(
-                    table_id, view_id, "月份", [period], field_type="text"
+                    table_id, view_id, "月份", [period], view_name=period
                 )
                 created[period] = view_id
                 log.info("created view %s for %s", view_name, spec.name)

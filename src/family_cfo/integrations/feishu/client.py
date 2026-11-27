@@ -10,6 +10,7 @@ Implements only the endpoints Family CFO needs, with:
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -17,7 +18,12 @@ from typing import Any, Callable
 import httpx
 
 from ...core.config import Settings
-from ...core.errors import FeishuApiError, FeishuAuthError, FeishuNotConfigured
+from ...core.errors import (
+    FeishuApiError,
+    FeishuAuthError,
+    FeishuError,
+    FeishuNotConfigured,
+)
 from ...core.logging import get_logger
 
 log = get_logger("feishu.client")
@@ -260,25 +266,46 @@ class FeishuClient:
         field_name: str,
         values: list[str],
         *,
-        field_type: str = "text",
+        view_name: str | None = None,
     ) -> None:
-        """Filter a view to rows whose ``field_name`` equals one of ``values``."""
-        condition = {
-            "field_name": field_name,
-            "operator": "is",
-            "value": values,
+        """Filter a view to rows whose ``field_name`` equals one of ``values``.
+
+        Three non-obvious requirements, each of which fails with a different
+        error code if violated:
+          * conditions must reference ``field_id`` (not ``field_name``),
+          * ``value`` must be a JSON *string* of the list, e.g. ``'["a"]'``
+            — passing a real list yields 9499, passing a bare string 1254001,
+          * the whole thing lives under ``property.filter_info``, not at the
+            top level of the body.
+        """
+        fields = {
+            f.get("field_name"): f.get("field_id") for f in self.list_fields(table_id)
         }
+        field_id = fields.get(field_name)
+        if not field_id:
+            raise FeishuError(f"字段不存在: {field_name}")
+        body: dict = {
+            "property": {
+                "filter_info": {
+                    "conjunction": "and",
+                    "conditions": [
+                        {
+                            "field_id": field_id,
+                            "operator": "is",
+                            "value": json.dumps(values, ensure_ascii=False),
+                        }
+                    ],
+                },
+                "hidden_fields": None,
+            }
+        }
+        if view_name:
+            body["view_name"] = view_name
         self.request(
             "PATCH",
             f"/open-apis/bitable/v1/apps/{self.settings.feishu_app_token}/tables/{table_id}/views/{view_id}",
-            json={
-                "filter_info": {
-                    "conjunction": "and",
-                    "conditions": [condition],
-                }
-            },
+            json=body,
         )
-        return None
 
     def create_field(self, table_id: str, field: dict) -> dict:
         payload = self.request(
@@ -340,6 +367,20 @@ class FeishuClient:
             "POST",
             f"/open-apis/bitable/v1/apps/{self.settings.feishu_app_token}/tables/{table_id}/records/batch_create",
             json={"records": [{"fields": r} for r in records]},
+        )
+        return payload.get("data", {}).get("records", [])
+
+    def batch_update(self, table_id: str, records: list[dict]) -> list[dict]:
+        """Update up to 500 records in one call.
+
+        ``records`` items look like ``{"record_id": ..., "fields": {...}}``.
+        """
+        if len(records) > 500:
+            raise FeishuApiError("单次批量更新不能超过 500 条")
+        payload = self.request(
+            "POST",
+            f"/open-apis/bitable/v1/apps/{self.settings.feishu_app_token}/tables/{table_id}/records/batch_update",
+            json={"records": records},
         )
         return payload.get("data", {}).get("records", [])
 

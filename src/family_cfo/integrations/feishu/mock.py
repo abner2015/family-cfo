@@ -290,8 +290,13 @@ class MockFeishuServer:
                 return _code(1254041, "view not found")
             if request.method == "PATCH":
                 body = _body(request)
+                # Real API nests the filter under property.filter_info.
                 if "filter_info" in body:
                     view["filter_info"] = body["filter_info"]
+                elif isinstance(body.get("property"), dict):
+                    view["filter_info"] = body["property"].get("filter_info")
+                if body.get("view_name"):
+                    view["view_name"] = body["view_name"]
                 return _ok({"code": 0, "msg": "success", "data": {"view": view}})
             if request.method == "DELETE":
                 table.views.remove(view)
