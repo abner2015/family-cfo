@@ -21,13 +21,17 @@ from ..database.models import Account, FamilyMember
 log = get_logger("assets.accounts")
 
 PLATFORM_DEFAULT_ACCOUNT = {
-    "wechat": ("微信零钱", AccountType.PAYMENT_PLATFORM),
-    "alipay": ("支付宝余额", AccountType.PAYMENT_PLATFORM),
-    "bank": ("银行卡", AccountType.BANK),
-    "credit_card": ("信用卡", AccountType.CREDIT_CARD),
+    # 用户确认（2026-11-27）：微信/支付宝/京东都只是「招行储蓄卡(主账户)」的支付通道，
+    # 钱最终从主账户出。若为每个渠道建独立账户，会让同一笔消费在两处重复计数。
+    # 渠道信息统一记录在 transactions.source_platform，账户一律归主账户。
+    "wechat": ("招行储蓄卡(主账户)", AccountType.BANK),
+    "alipay": ("招行储蓄卡(主账户)", AccountType.BANK),
+    "jd": ("招行储蓄卡(主账户)", AccountType.BANK),
+    "other": ("招行储蓄卡(主账户)", AccountType.BANK),
+    "bank": ("招行储蓄卡(主账户)", AccountType.BANK),
+    "credit_card": ("京东白条(信用卡)", AccountType.CREDIT_CARD),
     "cash": ("现金", AccountType.CASH),
     "manual": ("现金", AccountType.CASH),
-    "other": ("其他账户", AccountType.OTHER),
 }
 
 

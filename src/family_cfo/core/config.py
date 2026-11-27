@@ -32,6 +32,16 @@ _FALSE = {"0", "false", "no", "off", "n"}
 def find_project_root(start: Path | None = None) -> Path:
     """Locate the project root (contains pyproject.toml) without hardcoding."""
     env_root = os.environ.get(f"{ENV_PREFIX}ROOT")
+    if not env_root:
+        # .env 里也可能有 FAMILY_CFO_ROOT —— 只查 os.environ 会漏掉，
+        # 导致裸跑（未经包装器）时退化成 cwd。
+        dotenv = _dotenv_candidates(start or Path.cwd())
+        for candidate in dotenv:
+            if candidate.exists():
+                value = dotenv_values(candidate).get(f"{ENV_PREFIX}ROOT")
+                if value:
+                    env_root = value
+                    break
     if env_root:
         return Path(env_root).expanduser().resolve()
     cur = (start or Path.cwd()).resolve()
@@ -39,6 +49,17 @@ def find_project_root(start: Path | None = None) -> Path:
         if (candidate / "pyproject.toml").exists() or (candidate / "skills").is_dir():
             return candidate
     return cur
+
+
+def _dotenv_candidates(start: Path) -> list[Path]:
+    """候选 .env 路径：从 start 向上找，以及当前工作目录。"""
+    out: list[Path] = []
+    cur = start.resolve()
+    for candidate in [cur, *cur.parents]:
+        p = candidate / ".env"
+        if p not in out:
+            out.append(p)
+    return out
 
 
 def _as_bool(value: Any, default: bool) -> bool:
