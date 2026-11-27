@@ -14,7 +14,7 @@ from typing import Any
 
 import yaml
 
-from ...core.errors import ConfigError
+from ...core.errors import ConfigError, FamilyCFOError
 
 FIELD_TYPES = {
     "text": 1,
@@ -46,6 +46,10 @@ class TableSpec:
     entity: str
     primary_field: str
     fields: list[FieldSpec] = field(default_factory=list)
+    # "month" -> rows are partitioned by a YYYY-MM field inside one table;
+    # the sync service maintains per-month views and archives old months
+    # to local exports so the remote table never hits its row cap.
+    periodic: str | None = None
 
     def field_names(self) -> list[str]:
         return [f.name for f in self.fields]
@@ -59,6 +63,7 @@ DEFAULT_TABLES: dict[str, dict] = {
         "name": "FamilyCFO_交易明细",
         "entity": "transaction",
         "primary_field": "业务ID",
+        "periodic": "month",
         "fields": [
             ("业务ID", "text"),
             ("日期", "date"),
@@ -73,6 +78,7 @@ DEFAULT_TABLES: dict[str, dict] = {
             ("状态", "text"),
             ("来源", "text"),
             ("纳入统计", "checkbox"),
+            ("月份", "text"),
         ],
     },
     "assets": {
@@ -156,6 +162,56 @@ DEFAULT_TABLES: dict[str, dict] = {
             ("生成日期", "date"),
         ],
     },
+    "annual_summaries": {
+        # The app lacks the bitable table-management role and cannot create
+        # tables (1254302 RolePermNotAllow); renaming is blocked too. So the
+        # annual roll-up reuses the existing empty "数据表", adding the
+        # year-specific columns alongside its original "文本" column.
+        #
+        # NOTE: annual_summaries and category_annual_summaries share this one
+        # physical table, so they must declare the SAME field set; rows are
+        # told apart by the 业务ID prefix ("annual:" vs "category_annual:").
+        "name": "数据表",
+        "entity": "annual_summary",
+        "primary_field": "业务ID",
+        "fields": [
+            ("业务ID", "text"),
+            ("年份", "text"),
+            ("分类", "text"),
+            ("笔数", "number"),
+            ("收入", "number"),
+            ("支出", "number"),
+            ("结余", "number"),
+            ("储蓄率", "number"),
+            ("总资产", "number"),
+            ("总负债", "number"),
+            ("净资产", "number"),
+            ("金额", "number"),
+            ("占比", "number"),
+            ("生成日期", "date"),
+        ],
+    },
+    "category_annual_summaries": {
+        "name": "数据表",
+        "entity": "category_annual_summary",
+        "primary_field": "业务ID",
+        "fields": [
+            ("业务ID", "text"),
+            ("年份", "text"),
+            ("分类", "text"),
+            ("笔数", "number"),
+            ("收入", "number"),
+            ("支出", "number"),
+            ("结余", "number"),
+            ("储蓄率", "number"),
+            ("总资产", "number"),
+            ("总负债", "number"),
+            ("净资产", "number"),
+            ("金额", "number"),
+            ("占比", "number"),
+            ("生成日期", "date"),
+        ],
+    },
 }
 
 
@@ -189,12 +245,18 @@ def load_schema(project_root: Path) -> dict[str, TableSpec]:
             entity=definition.get("entity") or default["entity"],
             primary_field=definition.get("primary_field") or default["primary_field"],
             fields=fields,
+            periodic=definition.get("periodic") or default.get("periodic"),
         )
     return specs
 
 
 def ensure_remote_tables(client, specs: dict[str, TableSpec]) -> dict[str, str]:
-    """Create missing tables/fields and return ``{schema_key: table_id}``."""
+    """Create missing tables/fields and return ``{schema_key: table_id}``.
+
+    Periodic specs (``periodic="month"``) are skipped here: their concrete
+    tables are named ``<base>_<YYYY-MM>`` and are created on demand by the
+    sync service when a month actually has rows.
+    """
     from ...core.logging import get_logger
 
     log = get_logger("feishu.schema")
@@ -203,9 +265,35 @@ def ensure_remote_tables(client, specs: dict[str, TableSpec]) -> dict[str, str]:
     for key, spec in specs.items():
         table = existing.get(spec.name)
         if table is None:
+            if spec.periodic:
+                # Try to create it, but tolerate a permission denial: the
+                # production app lacks the bitable table-management role
+                # (1254302 RolePermNotAllow) and periodic tables are expected
+                # to exist already, having been made in the Feishu UI.
+                try:
+                    created = client.create_table(spec.name, spec.api_fields())
+                    table_id = created.get("table_id") or created.get("id")
+                    log.info("created bitable %s (%s)", spec.name, table_id)
+                    if table_id:
+                        result[key] = table_id
+                        existing[spec.name] = {"table_id": table_id, "name": spec.name}
+                    continue
+                except FamilyCFOError as exc:
+                    code = getattr(exc, "api_code", None)
+                    if code == 1254302:
+                        log.warning(
+                            "no table-management role for %s; create in the Feishu UI",
+                            spec.name,
+                        )
+                        continue
+                    raise
             created = client.create_table(spec.name, spec.api_fields())
             table_id = created.get("table_id") or created.get("id")
             log.info("created bitable %s (%s)", spec.name, table_id)
+            if table_id:
+                # Multiple specs may share one physical table (annual roll-ups);
+                # refresh the snapshot so the second one reuses it.
+                existing[spec.name] = {"table_id": table_id, "name": spec.name}
         else:
             table_id = table.get("table_id") or table.get("id")
             remote_fields = {f.get("field_name") for f in client.list_fields(table_id)}

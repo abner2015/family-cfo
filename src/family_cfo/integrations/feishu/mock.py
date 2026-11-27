@@ -30,6 +30,10 @@ BATCH_UPDATE_RE = re.compile(
 RECORD_RE = re.compile(
     r"^/open-apis/bitable/v1/apps/([^/]+)/tables/([^/]+)/records/([^/]+)$"
 )
+VIEWS_RE = re.compile(r"^/open-apis/bitable/v1/apps/([^/]+)/tables/([^/]+)/views$")
+VIEW_RE = re.compile(
+    r"^/open-apis/bitable/v1/apps/([^/]+)/tables/([^/]+)/views/([^/]+)$"
+)
 
 
 @dataclass
@@ -38,6 +42,7 @@ class MockTable:
     name: str
     fields: list[dict] = field(default_factory=list)
     records: dict[str, dict] = field(default_factory=dict)
+    views: list[dict] = field(default_factory=list)
 
 
 class MockFeishuServer:
@@ -130,11 +135,13 @@ class MockFeishuServer:
                     }
                 )
             self.tables[table_id] = table
+            # Real API returns {"data": {"table_id": ..., "default_view_id": ...}}
+            # (no data.table layer) — mirror that exactly.
             return _ok(
                 {
                     "code": 0,
                     "msg": "success",
-                    "data": {"table": {"table_id": table_id, "name": table.name}},
+                    "data": {"table_id": table_id, "default_view_id": "vew" + table_id},
                 }
             )
 
@@ -245,6 +252,49 @@ class MockFeishuServer:
                 return _ok({"code": 0, "msg": "success", "data": {"record": record}})
             if request.method == "DELETE":
                 del table.records[match.group(3)]
+                return _ok({"code": 0, "msg": "success", "data": {}})
+
+        match = VIEWS_RE.match(path)
+        if match:
+            table = self._table(match.group(2))
+            if table is None:
+                return _code(1254041, "table not found")
+            if request.method == "GET":
+                return _ok(
+                    {
+                        "code": 0,
+                        "msg": "success",
+                        "data": {"items": table.views, "has_more": False},
+                    }
+                )
+            if request.method == "POST":
+                body = _body(request)
+                view = {
+                    "view_id": self._new_id("vew"),
+                    "view_name": body.get("view_name", "grid"),
+                    "view_type": body.get("view_type", "grid"),
+                    "filter_info": None,
+                }
+                table.views.append(view)
+                return _ok({"code": 0, "msg": "success", "data": {"view": view}})
+
+        match = VIEW_RE.match(path)
+        if match:
+            table = self._table(match.group(2))
+            if table is None:
+                return _code(1254041, "table not found")
+            view = next(
+                (v for v in table.views if v["view_id"] == match.group(3)), None
+            )
+            if view is None:
+                return _code(1254041, "view not found")
+            if request.method == "PATCH":
+                body = _body(request)
+                if "filter_info" in body:
+                    view["filter_info"] = body["filter_info"]
+                return _ok({"code": 0, "msg": "success", "data": {"view": view}})
+            if request.method == "DELETE":
+                table.views.remove(view)
                 return _ok({"code": 0, "msg": "success", "data": {}})
 
         return _ok({"code": 404, "msg": f"mock route not implemented: {request.method} {path}"})

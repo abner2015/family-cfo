@@ -23,10 +23,25 @@ from family_cfo.planning.service import PlanningService
 def test_schema_yaml_matches_default_tables(settings):
     specs = load_schema(settings.project_root)
     assert set(specs) == {
-        "transactions", "assets", "liabilities", "budgets", "goals", "monthly_reports"
+        "transactions",
+        "assets",
+        "liabilities",
+        "budgets",
+        "goals",
+        "monthly_reports",
+        "annual_summaries",
+        "category_annual_summaries",
     }
     assert specs["transactions"].primary_field == "业务ID"
     assert "金额" in specs["transactions"].field_names()
+    # The detail table is month-partitioned inside one physical table.
+    assert specs["transactions"].periodic == "month"
+    assert "月份" in specs["transactions"].field_names()
+    # The annual roll-up reuses one shared physical table.
+    assert specs["annual_summaries"].name == specs["category_annual_summaries"].name
+    assert set(specs["annual_summaries"].field_names()) == set(
+        specs["category_annual_summaries"].field_names()
+    )
 
 
 def test_not_configured_does_not_pretend(settings):
@@ -42,11 +57,14 @@ def test_not_configured_does_not_pretend(settings):
 
 
 def test_ensure_tables_creates_and_is_idempotent(sync_service, mock_feishu):
-    assert len(mock_feishu.tables) == 6
+    # The fixture already ran ensure_tables(): 6 base tables + 1 shared
+    # annual-roll-up table ("数据表") that both annual specs reuse.
+    assert len(mock_feishu.tables) == 7
     mapping = sync_service.ensure_tables()
-    assert len(mapping) == 6
+    assert len(mapping) == 8
+    assert len(mock_feishu.tables) == 7
     sync_service.ensure_tables()
-    assert len(mock_feishu.tables) == 6
+    assert len(mock_feishu.tables) == 7
 
 
 def test_push_transactions_and_skip_unchanged(sync_service, import_fixture, mock_feishu):

@@ -1408,7 +1408,14 @@ def feishu_ensure_tables(ctx: typer.Context) -> None:
 @feishu_app.command("sync")
 def feishu_sync(
     ctx: typer.Context,
-    entity: Optional[str] = typer.Option(None, "--entity", help="transactions/assets/liabilities/budgets/goals/monthly_reports"),
+    entity: Optional[str] = typer.Option(
+        None,
+        "--entity",
+        help=(
+            "transactions/assets/liabilities/budgets/goals/monthly_reports/"
+            "annual_summaries/category_annual_summaries"
+        ),
+    ),
     all_entities: bool = typer.Option(False, "--all", help="推送全部实体"),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:

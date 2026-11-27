@@ -230,6 +230,56 @@ class FeishuClient:
         )
         return payload.get("data", {}).get("items", [])
 
+    # ---------------------------------------------------------------- views
+    def list_views(self, table_id: str) -> list[dict]:
+        payload = self.request(
+            "GET",
+            f"/open-apis/bitable/v1/apps/{self.settings.feishu_app_token}/tables/{table_id}/views",
+            params={"page_size": 100},
+        )
+        return payload.get("data", {}).get("items", [])
+
+    def create_view(self, table_id: str, view_name: str, *, view_type: str = "grid") -> dict:
+        payload = self.request(
+            "POST",
+            f"/open-apis/bitable/v1/apps/{self.settings.feishu_app_token}/tables/{table_id}/views",
+            json={"view_name": view_name, "view_type": view_type},
+        )
+        return payload.get("data", {}).get("view", {})
+
+    def delete_view(self, table_id: str, view_id: str) -> None:
+        self.request(
+            "DELETE",
+            f"/open-apis/bitable/v1/apps/{self.settings.feishu_app_token}/tables/{table_id}/views/{view_id}",
+        )
+
+    def set_view_filter(
+        self,
+        table_id: str,
+        view_id: str,
+        field_name: str,
+        values: list[str],
+        *,
+        field_type: str = "text",
+    ) -> None:
+        """Filter a view to rows whose ``field_name`` equals one of ``values``."""
+        condition = {
+            "field_name": field_name,
+            "operator": "is",
+            "value": values,
+        }
+        self.request(
+            "PATCH",
+            f"/open-apis/bitable/v1/apps/{self.settings.feishu_app_token}/tables/{table_id}/views/{view_id}",
+            json={
+                "filter_info": {
+                    "conjunction": "and",
+                    "conditions": [condition],
+                }
+            },
+        )
+        return None
+
     def create_field(self, table_id: str, field: dict) -> dict:
         payload = self.request(
             "POST",

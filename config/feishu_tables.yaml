@@ -8,6 +8,7 @@ tables:
     name: FamilyCFO_交易明细
     entity: transaction
     primary_field: 业务ID
+    periodic: month
     fields:
       - { name: 业务ID, type: text }
       - { name: 日期, type: date }
@@ -22,6 +23,7 @@ tables:
       - { name: 状态, type: text }
       - { name: 来源, type: text }
       - { name: 纳入统计, type: checkbox }
+      - { name: 月份, type: text }
   assets:
     name: FamilyCFO_资产
     entity: asset

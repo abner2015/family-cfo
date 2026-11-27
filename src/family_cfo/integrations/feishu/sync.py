@@ -53,7 +53,16 @@ from .schema import TableSpec, ensure_remote_tables, load_schema
 
 log = get_logger("feishu.sync")
 
-PUSH_ENTITIES = ("transactions", "assets", "liabilities", "budgets", "goals", "monthly_reports")
+PUSH_ENTITIES = (
+    "transactions",
+    "assets",
+    "liabilities",
+    "budgets",
+    "goals",
+    "monthly_reports",
+    "annual_summaries",
+    "category_annual_summaries",
+)
 
 
 class GoalPull(BaseModel):
@@ -169,44 +178,227 @@ class FeishuSyncService:
             ids.update(self.ensure_tables())
         return ids
 
+    # ------------------------------------------------------- periodic tables
+    def _period_table_id(self, entity: str, period: str = "") -> str:
+        """Resolve the remote table that holds rows for this entity.
+
+        The Feishu app used here has no bitable table-management role
+        (creating or renaming tables fails with 1254302 RolePermNotAllow),
+        so periodic entities share ONE table and are separated by a
+        ``月份`` field plus one filtered view per month.
+        """
+        spec = self.specs[entity]
+        config_key = f"feishu.table_id.{entity}"
+        with self.db.session() as session:
+            row = session.get(SystemConfig, config_key)
+            if row is not None:
+                return row.value
+        existing = {t.get("name"): t for t in self.client.list_tables()}
+        table = existing.get(spec.name)
+        if table is None:
+            raise FeishuError(
+                f"飞书数据表不存在: {spec.name}",
+                detail="应用缺少数据表管理权限，无法自动建表；请先在飞书网页端创建该表。",
+            )
+        table_id = table.get("table_id") or table.get("id")
+        if not table_id:
+            raise FeishuError(f"无法获取飞书数据表 ID: {spec.name}")
+        with self.db.session() as session:
+            self._set_config(session, config_key, table_id)
+        return table_id
+
+    def ensure_month_views(self, entity: str = "transactions") -> dict[str, str]:
+        """Create one filtered view per month so each month is browsable."""
+        spec = self.specs[entity]
+        table_id = self._period_table_id(entity, "0000-00")
+        periods = self._remote_periods(entity, table_id)
+        existing = self.client.list_views(table_id)
+        by_name = {v.get("view_name"): v for v in existing}
+        created: dict[str, str] = {}
+        for period in sorted(periods):
+            view_name = f"{period}"
+            if view_name in by_name:
+                created[period] = by_name[view_name].get("view_id")
+                continue
+            view = self.client.create_view(table_id, view_name, view_type="grid")
+            view_id = (view or {}).get("view_id")
+            if view_id:
+                self.client.set_view_filter(
+                    table_id, view_id, "月份", [period], field_type="text"
+                )
+                created[period] = view_id
+                log.info("created view %s for %s", view_name, spec.name)
+        return created
+
+    def _remote_periods(self, entity: str, table_id: str) -> set[str]:
+        """Distinct 月份 values currently stored remotely."""
+        found: set[str] = set()
+        token = None
+        while True:
+            res = self.client.list_records(table_id, page_token=token, page_size=500)
+            for item in res.get("items", []):
+                fields = item.get("fields") or {}
+                value = fields.get("月份")
+                if isinstance(value, list):
+                    value = "".join(
+                        part.get("text", "") for part in value if isinstance(part, dict)
+                    )
+                if value:
+                    found.add(str(value))
+            token = res.get("page_token")
+            if not res.get("has_more"):
+                break
+        return found
+
+    def archive_old_periods(
+        self,
+        entity: str = "transactions",
+        *,
+        keep_months: int = 12,
+        row_limit: int = 1800,
+    ) -> dict:
+        """Trim the remote table so it never hits Feishu's row cap.
+
+        Rows older than ``keep_months`` are deleted remotely — they stay in
+        the authoritative SQLite ledger and in the local CSV/XLSX exports, so
+        nothing is lost. Deletion only happens when the table exceeds
+        ``row_limit``.
+        """
+        spec = self.specs[entity]
+        table_id = self._period_table_id(entity)
+        total = 0
+        token = None
+        while True:
+            res = self.client.list_records(table_id, page_token=token, page_size=500)
+            total += len(res.get("items", []))
+            token = res.get("page_token")
+            if not res.get("has_more"):
+                break
+        if total <= row_limit:
+            return {"entity": entity, "remote_rows": total, "deleted": 0, "skipped": "under_limit"}
+
+        cutoff = _cutoff_period(keep_months)
+        to_delete: list[str] = []
+        token = None
+        while True:
+            res = self.client.list_records(table_id, page_token=token, page_size=500)
+            for item in res.get("items", []):
+                fields = item.get("fields") or {}
+                value = fields.get("月份")
+                if isinstance(value, list):
+                    value = "".join(
+                        part.get("text", "") for part in value if isinstance(part, dict)
+                    )
+                if value and str(value) < cutoff:
+                    to_delete.append(item.get("record_id"))
+            token = res.get("page_token")
+            if not res.get("has_more"):
+                break
+
+        deleted = 0
+        for record_id in to_delete:
+            try:
+                self.client.delete_record(table_id, record_id)
+                deleted += 1
+            except FeishuError as exc:
+                log.warning("archive delete failed for %s: %s", record_id, exc)
+        # Forget the local mapping so archived rows get re-pushed if needed.
+        with self.db.session() as session:
+            row = session.get(SystemConfig, f"feishu.table_id.{entity}")
+            if row is not None:
+                session.delete(row)
+        log.info(
+            "archived %d rows from %s (cutoff %s, was %d rows)",
+            deleted, spec.name, cutoff, total,
+        )
+        return {
+            "entity": entity,
+            "remote_rows": total,
+            "deleted": deleted,
+            "cutoff": cutoff,
+        }
+
     # ----------------------------------------------------------------- push
     def push(self, entity: str, *, dry_run: bool = False) -> SyncReport:
         if entity not in PUSH_ENTITIES:
             raise ValidationError(f"不支持同步的实体: {entity}")
-        table_ids = self.table_ids(ensure=not dry_run)
-        table_id = table_ids.get(entity)
-        if not table_id:
-            raise FeishuError(f"缺少数据表映射: {entity}")
+        spec = self.specs.get(entity)
         builder = getattr(self, f"_payloads_{entity}")
         with self.db.session() as session:
             household = get_household(session)
             payloads = list(builder(session, household.id))
         report = SyncReport(entity=entity, dry_run=dry_run)
+
+        if spec is not None and spec.periodic == "month":
+            self._push_monthly(entity, payloads, dry_run=dry_run, report=report)
+            return report
+
+        table_ids = self.table_ids(ensure=not dry_run)
+        table_id = table_ids.get(entity)
+        if not table_id:
+            raise FeishuError(f"缺少数据表映射: {entity}")
         for entity_id, fields in payloads:
-            try:
-                self._push_one(
-                    entity, entity_id, fields, table_id, dry_run=dry_run, report=report
-                )
-            except ConflictError as exc:
-                report.conflicts.append({"entity_id": entity_id, "reason": str(exc)})
-                self._mark(
-                    entity, entity_id, direction="push", status=SyncStatus.CONFLICT,
-                    error=str(exc), attempted=True,
-                )
-            except (FeishuError, ValidationError) as exc:
-                report.failed.append({"entity_id": entity_id, "error": str(exc)})
-                self._mark(
-                    entity, entity_id, direction="push", status=SyncStatus.FAILED,
-                    error=str(exc), attempted=True,
-                )
-            except Exception as exc:  # noqa: BLE001 - isolate one bad record
-                log.exception("unexpected sync error for %s/%s", entity, entity_id)
-                report.failed.append({"entity_id": entity_id, "error": str(exc)})
-                self._mark(
-                    entity, entity_id, direction="push", status=SyncStatus.FAILED,
-                    error=str(exc), attempted=True,
-                )
+            self._push_one_safe(entity, entity_id, fields, table_id, dry_run=dry_run, report=report)
         return report
+
+    def _push_monthly(
+        self,
+        entity: str,
+        payloads: list[tuple[str, dict]],
+        *,
+        dry_run: bool,
+        report: SyncReport,
+    ) -> None:
+        """Push rows into the shared table, tagged with a ``月份`` field.
+
+        The remote table is shared across months (the app cannot create
+        tables), so each row carries its ``YYYY-MM`` period and one filtered
+        view per month is maintained for browsing.
+        """
+        table_id = "" if dry_run else self._period_table_id(entity, "")
+        for entity_id, fields in payloads:
+            period = _period_of(fields)
+            if not period:
+                report.failed.append({"entity_id": entity_id, "error": "缺少日期，无法确定月份"})
+                continue
+            fields = {**fields, "月份": period}
+            self._push_one_safe(
+                entity, entity_id, fields, table_id, dry_run=dry_run, report=report
+            )
+
+    def _push_one_safe(
+        self,
+        entity: str,
+        entity_id: str,
+        fields: dict,
+        table_id: str,
+        *,
+        dry_run: bool,
+        report: SyncReport,
+    ) -> None:
+        try:
+            self._push_one(
+                entity, entity_id, fields, table_id, dry_run=dry_run, report=report
+            )
+        except ConflictError as exc:
+            report.conflicts.append({"entity_id": entity_id, "reason": str(exc)})
+            self._mark(
+                entity, entity_id, direction="push", status=SyncStatus.CONFLICT,
+                error=str(exc), attempted=True,
+            )
+        except (FeishuError, ValidationError) as exc:
+            report.failed.append({"entity_id": entity_id, "error": str(exc)})
+            self._mark(
+                entity, entity_id, direction="push", status=SyncStatus.FAILED,
+                error=str(exc), attempted=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - isolate one bad record
+            log.exception("unexpected sync error for %s/%s", entity, entity_id)
+            report.failed.append({"entity_id": entity_id, "error": str(exc)})
+            self._mark(
+                entity, entity_id, direction="push", status=SyncStatus.FAILED,
+                error=str(exc), attempted=True,
+            )
 
     def _push_one(
         self,
@@ -386,6 +578,98 @@ class FeishuSyncService:
                 "净资产": float(Decimal(bs["net_worth"])),
                 "生成日期": _ms(date.today()),
             }
+
+    def _payloads_annual_summaries(self, session: Session, household_id: str):
+        """One row per year: income/expense/net/savings rate plus year-end balance."""
+        from ...finance.metrics import balance_sheet, period_summary
+
+        years = sorted(
+            {
+                dt.strftime("%Y")
+                for dt in session.scalars(
+                    select(Transaction.occurred_at).where(
+                        Transaction.household_id == household_id,
+                        Transaction.is_deleted.is_(False),
+                    )
+                )
+            }
+        )
+        for year in years:
+            income = expense = count = 0
+            for month in range(1, 13):
+                period = f"{year}-{month:02d}"
+                summary = period_summary(session, household_id, period)
+                income += summary.income_minor
+                expense += summary.expense_minor
+                count += summary.transaction_count
+            net = income - expense
+            sheet = balance_sheet(
+                session, household_id, as_of=date(int(year), 12, 31)
+            )
+            report_id = f"annual:{year}"
+            yield report_id, {
+                "业务ID": report_id,
+                "年份": year,
+                "笔数": count,
+                "收入": _yuan(income),
+                "支出": _yuan(expense),
+                "结余": _yuan(net),
+                "储蓄率": float(Decimal(net) / Decimal(income)) if income else 0.0,
+                "总资产": _yuan(sheet.total_assets_minor),
+                "总负债": _yuan(sheet.liabilities_minor),
+                "净资产": _yuan(sheet.net_worth_minor),
+                "生成日期": _ms(date.today()),
+            }
+
+    def _payloads_category_annual_summaries(self, session: Session, household_id: str):
+        """One row per (year, category): spend, count and share of annual spend."""
+        from ...finance.metrics import net_flow_by_category, period_summary
+
+        years = sorted(
+            {
+                dt.strftime("%Y")
+                for dt in session.scalars(
+                    select(Transaction.occurred_at).where(
+                        Transaction.household_id == household_id,
+                        Transaction.is_deleted.is_(False),
+                    )
+                )
+            }
+        )
+        for year in years:
+            yearly: dict[str, dict] = {}
+            for month in range(1, 13):
+                period = f"{year}-{month:02d}"
+                for row in net_flow_by_category(session, household_id, period):
+                    if row.get("direction") != "outflow":
+                        continue
+                    name = row.get("category") or "未分类"
+                    bucket = yearly.setdefault(
+                        name, {"amount_minor": 0, "count": 0}
+                    )
+                    bucket["amount_minor"] += int(row.get("amount_minor") or 0)
+                    bucket["count"] += int(row.get("count") or 0)
+            total_expense = 0
+            for month in range(1, 13):
+                summary = period_summary(session, household_id, f"{year}-{month:02d}")
+                total_expense += summary.expense_minor
+            for name, bucket in sorted(
+                yearly.items(), key=lambda kv: kv[1]["amount_minor"], reverse=True
+            ):
+                if bucket["amount_minor"] <= 0:
+                    continue
+                report_id = f"category_annual:{year}:{name}"
+                yield report_id, {
+                    "业务ID": report_id,
+                    "年份": year,
+                    "分类": name,
+                    "笔数": bucket["count"],
+                    "金额": _yuan(bucket["amount_minor"]),
+                    "占比": float(Decimal(bucket["amount_minor"]) / Decimal(total_expense))
+                    if total_expense
+                    else 0.0,
+                    "生成日期": _ms(date.today()),
+                }
 
     # ------------------------------------------------------------------ pull
     def pull(self, entity: str) -> SyncReport:
@@ -617,15 +901,22 @@ class FeishuSyncService:
             raise ValidationError("只有 goals/budgets 支持以远端为准")
         report = SyncReport(entity=entity)
         if strategy == "local":
-            table_ids = self.table_ids(ensure=False)
             builder = getattr(self, f"_payloads_{entity}")
             with self.db.session() as session:
                 household = get_household(session)
                 fields = dict(builder(session, household.id)).get(entity_id)
             if fields is None:
                 raise ValidationError(f"本地记录不存在: {entity_id}")
+            spec = self.specs.get(entity)
+            if spec is not None and spec.periodic == "month":
+                period = _period_of(fields)
+                if not period:
+                    raise ValidationError(f"记录缺少日期，无法确定月份表: {entity_id}")
+                table_id = self._period_table_id(entity, period)
+            else:
+                table_id = self.table_ids(ensure=False)[entity]
             self._push_one(
-                entity, entity_id, fields, table_ids[entity], dry_run=False, report=report, force=True
+                entity, entity_id, fields, table_id, dry_run=False, report=report, force=True
             )
             return report
         # remote wins: clear the conflict marker and pull that entity
@@ -735,6 +1026,27 @@ class FeishuSyncService:
             session.add(SystemConfig(key=key, value=value))
         else:
             row.value = value
+
+
+def _cutoff_period(keep_months: int) -> str:
+    """Return the oldest ``YYYY-MM`` period that should stay on Feishu."""
+    today = date.today()
+    total = today.year * 12 + (today.month - 1) - keep_months
+    year, month = divmod(total, 12)
+    return f"{year:04d}-{month + 1:02d}"
+
+
+def _period_of(fields: dict) -> str | None:
+    """Extract ``YYYY-MM`` from a payload's date field (ms epoch or string)."""
+    raw = fields.get("日期")
+    if raw in (None, "", 0):
+        return None
+    if isinstance(raw, (int, float)):
+        return datetime.fromtimestamp(int(raw) / 1000).strftime("%Y-%m")
+    text = str(raw)
+    if len(text) >= 7 and text[4] == "-":
+        return text[:7]
+    return None
 
 
 def _text(value: Any) -> str | None:
