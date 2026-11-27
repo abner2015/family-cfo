@@ -100,7 +100,7 @@ for sub, name in (
 
 @dataclass
 class CliState:
-    root: Path
+    root: Path | None
     db_path: Path | None = None
     as_json: bool = False
     verbose: bool = False
@@ -139,7 +139,10 @@ def main_callback(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="输出调试日志"),
 ) -> None:
     ctx.obj = CliState(
-        root=(root or Path.cwd()).resolve(),
+        # 不传 --root 时保持 None，交给 load_config → find_project_root() 解析：
+        # 它认 FAMILY_CFO_ROOT 环境变量，也能向上找 pyproject.toml。
+        # 这里若填 Path.cwd()，在任意目录运行都会把项目根认成 cwd。
+        root=root.resolve() if root else None,
         db_path=db.resolve() if db else None,
         as_json=json_output,
         verbose=verbose,
@@ -399,6 +402,9 @@ def settle(
         None, "--pending-policy", help="待确认交易策略：suspend（暂挂，不计入统计）"
     ),
     mark_missing: Optional[str] = typer.Option(None, "--mark-missing", help="标记缺失渠道，如 bank"),
+    mark_optional: Optional[str] = typer.Option(
+        None, "--mark-optional", help="标记可选渠道（不阻塞关账），如 bank"
+    ),
 ) -> None:
     """月度结算状态机：归集 → 对账 → 审核 → 关账。"""
     state: CliState = ctx.obj
@@ -416,6 +422,10 @@ def settle(
                 if not reason:
                     raise ValidationError("--mark-missing 需要 --reason 说明缺失原因")
                 service.mark_source(period, mark_missing, status="missing", reason=reason)
+            if mark_optional:
+                if not reason:
+                    raise ValidationError("--mark-optional 需要 --reason 说明原因")
+                service.mark_source(period, mark_optional, status="optional", reason=reason)
             if reopen:
                 if not reason:
                     raise ValidationError("--reopen 需要 --reason")

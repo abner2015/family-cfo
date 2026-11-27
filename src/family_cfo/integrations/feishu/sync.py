@@ -535,7 +535,7 @@ class FeishuSyncService:
                     else None
                 )
                 actual = actual_by_category.get(item.category_id, 0)
-                yield item.id, {
+                yield f"budget:{period}:{item.category_id}", {
                     "业务ID": item.id,
                     "账期": period,
                     "版本": budget.version,

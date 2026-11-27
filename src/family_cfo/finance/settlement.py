@@ -38,6 +38,27 @@ log = get_logger("finance.settlement")
 
 DEFAULT_SOURCES = ["wechat", "alipay", "bank"]
 
+# 用户确认（2026-11-27）：招行流水与微信/支付宝高度重叠，不作为每月必需渠道。
+# 只有需要房贷扣款、工资入账、理财申购等「支付平台看不见的钱」时才补导。
+OPTIONAL_SOURCES = {"bank"}
+
+BANK_OPTIONAL_REASON = (
+    "用户确认不导招行流水（与微信/支付宝账单重叠）。"
+    "仅当需要房贷扣款、工资入账、理财申购、余额宝转入等银行独有流水时补导。"
+)
+
+
+def default_source_entries() -> list[dict]:
+    """默认渠道清单：必需渠道 + 可选渠道（可选不阻塞关账）。"""
+    return [
+        {
+            "source": s,
+            "status": "optional" if s in OPTIONAL_SOURCES else "expected",
+            "reason": BANK_OPTIONAL_REASON if s in OPTIONAL_SOURCES else None,
+        }
+        for s in DEFAULT_SOURCES
+    ]
+
 
 @dataclass
 class ChecklistItem:
@@ -139,7 +160,7 @@ class SettlementService:
                     if source and source not in seen:
                         seen.append(source)
             sources = seen or list(DEFAULT_SOURCES)
-        return [{"source": s, "status": "expected", "reason": None} for s in sources]
+        return default_source_entries()
 
     def expected_sources(self, period: str) -> list[dict]:
         settlement = self.ensure(period)
@@ -147,7 +168,7 @@ class SettlementService:
             data = json.loads(settlement.expected_sources or "[]")
         except json.JSONDecodeError:
             data = []
-        return data or [{"source": s, "status": "expected", "reason": None} for s in DEFAULT_SOURCES]
+        return data or default_source_entries()
 
     def mark_source(
         self,
@@ -158,10 +179,10 @@ class SettlementService:
         reason: str,
         actor: str = "cli",
     ) -> Settlement:
-        if status not in {"expected", "missing"}:
-            raise ValidationError("status 只能是 expected 或 missing")
-        if status == "missing" and not reason.strip():
-            raise ValidationError("标记缺失渠道必须填写原因")
+        if status not in {"expected", "missing", "optional"}:
+            raise ValidationError("status 只能是 expected、missing 或 optional")
+        if status in {"missing", "optional"} and not reason.strip():
+            raise ValidationError("标记缺失/可选渠道必须填写原因")
         settlement = self.ensure(period)
         sources = self.expected_sources(period)
         found = False
@@ -216,7 +237,7 @@ class SettlementService:
 
         missing = []
         for item in sources:
-            if item["status"] == "missing":
+            if item["status"] in {"missing", "optional"}:
                 continue
             has_batch = any(
                 b.detected_platform == item["source"] and b.status in {"imported"}
@@ -247,8 +268,13 @@ class SettlementService:
         )
 
         pending = [t for t in txns if t.status == TxnStatus.PENDING_REVIEW]
+        # 已用 `tx resolve --duplicate` 处理的交易 stats_included=False，
+        # 视为已人工确认，不应再计入「疑似重复」阻塞项。
         duplicate_suspects = [
-            t for t in txns if t.review_reason == REVIEW_DUPLICATE or t.duplicate_of_id
+            t
+            for t in txns
+            if (t.review_reason == REVIEW_DUPLICATE or t.duplicate_of_id)
+            and t.stats_included
         ]
         unlinked_refunds = [
             t
